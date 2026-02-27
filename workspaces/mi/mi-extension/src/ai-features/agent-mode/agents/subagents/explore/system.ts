@@ -44,8 +44,9 @@ When given a search query:
 
 ## Available Tools
 
-- file_read: Read file contents
-- grep: Search file contents with regex
+- semantic_code_search: **PRIMARY** — Search the MI project using semantic similarity. Returns file paths, line ranges, and XML element hierarchy. Use this FIRST for any code search query.
+- file_read: Read file contents (use after semantic_code_search to inspect results)
+- grep: Search file contents with regex (fallback if semantic search returns no results)
 - glob: Find files by pattern
 
 ## MI/Synapse Project Structure

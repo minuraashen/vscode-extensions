@@ -1228,7 +1228,8 @@ export function createGrepExecute(projectPath: string): GrepExecuteFn {
                     if (entry.isDirectory()) {
                         // Skip common directories
                         if (entry.name === 'node_modules' || entry.name === '.git' ||
-                            entry.name === 'target' || entry.name === 'build') {
+                            entry.name === 'target' || entry.name === 'build' ||
+                            entry.name === '.data') {
                             continue;
                         }
                         searchInDirectory(fullPath, currentDepth + 1);
@@ -1416,7 +1417,10 @@ export function createGlobExecute(projectPath: string): GlobExecuteFn {
             const globPattern = path.join(fullSearchPath, pattern);
 
             // Use glob.sync() to find matching files (like Ballerina extension)
-            const rawMatches: string[] = glob.sync(globPattern, { nodir: true });
+            const rawMatches: string[] = glob.sync(globPattern, {
+                nodir: true,
+                ignore: ['**/node_modules/**', '**/.git/**', '**/target/**', '**/build/**', '**/.data/**'],
+            });
             const matches: string[] = rawMatches
                 .map((match) => path.resolve(match))
                 .filter((resolvedMatch) => isPathWithin(fullSearchPath, resolvedMatch));

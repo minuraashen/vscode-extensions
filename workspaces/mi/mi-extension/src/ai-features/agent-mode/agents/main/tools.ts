@@ -87,6 +87,10 @@ import {
     createWebFetchTool,
     createWebFetchExecute,
 } from '../../tools/web_tools';
+import {
+    createSemanticSearchTool,
+    createSemanticSearchExecute,
+} from '../../tools/semantic_search_tools';
 import { AnthropicModel } from '../../../connection';
 import { AgentMode } from '@wso2/mi-core';
 import { persistOversizedToolResult } from '../../tools/tool-result-persistence';
@@ -114,6 +118,7 @@ import {
     TASK_OUTPUT_TOOL_NAME,
     WEB_SEARCH_TOOL_NAME,
     WEB_FETCH_TOOL_NAME,
+    SEMANTIC_SEARCH_TOOL_NAME,
 } from '../../tools/types';
 import { BashExecuteFn, ToolResult } from '../../tools/types';
 import { AgentUndoCheckpointManager } from '../../undo/checkpoint-manager';
@@ -145,6 +150,7 @@ export {
     TASK_OUTPUT_TOOL_NAME,
     WEB_SEARCH_TOOL_NAME,
     WEB_FETCH_TOOL_NAME,
+    SEMANTIC_SEARCH_TOOL_NAME,
 };
 import { AgentEventHandler } from './agent';
 
@@ -185,6 +191,7 @@ const READ_ONLY_MODE_ALLOWED_TOOLS = new Set<string>([
     VALIDATE_CODE_TOOL_NAME,
     WEB_SEARCH_TOOL_NAME,
     WEB_FETCH_TOOL_NAME,
+    SEMANTIC_SEARCH_TOOL_NAME,
 ]);
 
 const PLAN_MODE_ALLOWED_TOOLS = new Set<string>([
@@ -503,6 +510,11 @@ export function createAgentTools(params: CreateToolsParams) {
         ),
         [TASK_OUTPUT_TOOL_NAME]: createTaskOutputTool(
             getWrappedExecute(TASK_OUTPUT_TOOL_NAME, createTaskOutputExecute())
+        ),
+
+        // Semantic Search Tool (1 tool)
+        [SEMANTIC_SEARCH_TOOL_NAME]: createSemanticSearchTool(
+            getWrappedExecute(SEMANTIC_SEARCH_TOOL_NAME, createSemanticSearchExecute(projectPath))
         ),
     };
 

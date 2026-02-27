@@ -31,6 +31,7 @@ import {
     ASK_USER_TOOL_NAME,
     WEB_SEARCH_TOOL_NAME,
     WEB_FETCH_TOOL_NAME,
+    SEMANTIC_SEARCH_TOOL_NAME,
 } from '../../tools/types';
 
 
@@ -48,6 +49,7 @@ User selected ASK mode.
   - ${VALIDATE_CODE_TOOL_NAME}
   - ${WEB_SEARCH_TOOL_NAME}
   - ${WEB_FETCH_TOOL_NAME}
+  - ${SEMANTIC_SEARCH_TOOL_NAME}
 - Do NOT attempt mutation/tooling actions (write/edit/build/run/shell/connector changes/subagents/plan-mode/todo updates).
 - If you need to provide codes/synapse configurations provide the fully updated code in a code block. Not just the edits. System provides an option called "Add to project" in ASK mode which replaces entire files with the code you provide.
 - ASK mode "Add to project" creates Undo cards only when the applied code actually changes project files (no-op applies do not create undo checkpoints).

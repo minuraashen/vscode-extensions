@@ -28,6 +28,7 @@ import { getRuntimeVersionFromPom } from '../../tools/connector_store_cache';
 import { getServerPathFromConfig } from '../../../../util/onboardingUtils';
 import { AgentMode } from '@wso2/mi-core';
 import { getModeReminder } from './mode';
+import { getEmbeddingService } from '../../embedding-service/src/embedding-service/vscode-service';
 
 const MAX_PROJECT_STRUCTURE_FILES = 50;
 const MAX_PROJECT_STRUCTURE_CHARS = 10000;
@@ -82,6 +83,7 @@ Today's date: {{env_today}}
 MI Runtime version: {{env_mi_runtime_version}}
 MI Runtime home path: {{env_mi_runtime_home_path}}
 MI Runtime carbon log path: {{env_mi_runtime_carbon_log_path}}
+Semantic search status: {{env_semantic_search_status}}
 </env>
 
 <system_reminder>
@@ -147,6 +149,7 @@ function formatProjectStructure(files: string[]): string {
             '.vscode/**',
             '.idea/**',
             '.mi-copilot/**',
+            '.data/**',
             '.env',
             '.env.local',
             '.env.development.local',
@@ -220,6 +223,30 @@ function getRuntimePaths(projectPath: string): {
 }
 
 // ============================================================================
+// Semantic Search Status
+// ============================================================================
+
+/**
+ * Returns a human-readable status string for the embedding service.
+ * Injected into the user prompt so the LLM knows whether semantic search is usable.
+ */
+function getSemanticSearchStatus(projectPath: string): string {
+    try {
+        const service = getEmbeddingService(projectPath);
+        if (service.isAvailable) {
+            const chunkCount = service.database?.getChunkCount() ?? 0;
+            return `ready (${chunkCount} chunks indexed)`;
+        }
+        if (service.isInitializing) {
+            return 'initializing — may be available shortly; prefer grep/glob until ready';
+        }
+        return 'unavailable — use grep/glob/file_read as fallback';
+    } catch {
+        return 'unavailable — use grep/glob/file_read as fallback';
+    }
+}
+
+// ============================================================================
 // User Prompt Generation
 // ============================================================================
 
@@ -282,6 +309,7 @@ export async function getUserPrompt(params: UserPromptParams): Promise<string> {
         env_mi_runtime_version: runtimeVersion || 'unknown',
         env_mi_runtime_home_path: runtimePaths.runtimeHomePath,
         env_mi_runtime_carbon_log_path: runtimePaths.carbonLogPath,
+        env_semantic_search_status: getSemanticSearchStatus(params.projectPath),
         system_remainder: `.
         <mode>
         ${mode.toUpperCase()}

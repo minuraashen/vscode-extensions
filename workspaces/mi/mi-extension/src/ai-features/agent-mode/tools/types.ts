@@ -124,6 +124,9 @@ export const TASK_OUTPUT_TOOL_NAME = 'task_output';
 export const WEB_SEARCH_TOOL_NAME = 'web_search';
 export const WEB_FETCH_TOOL_NAME = 'web_fetch';
 
+// Semantic Search Tool
+export const SEMANTIC_SEARCH_TOOL_NAME = 'semantic_code_search';
+
 // ============================================================================
 // Subagent Types
 // ============================================================================
@@ -363,3 +366,28 @@ export type TaskOutputExecuteFn = (args: {
     block?: boolean;
     timeout?: number;
 }) => Promise<TaskOutputResult>;
+
+// ============================================================================
+// Semantic Search Tool Execute Function Types
+// ============================================================================
+
+export interface SemanticSearchResult {
+    file_path: string;
+    line_range: [number, number];
+    xml_element_hierarchy: string[];
+    score: number;
+    chunk_id: string;
+}
+
+export interface SemanticSearchResponse {
+    results: SemanticSearchResult[];
+    confidence_threshold: number;
+    query_latency_ms: number;
+}
+
+export type SemanticSearchExecuteFn = (args: {
+    query: string;
+    top_k?: number;
+    score_threshold?: number;
+    semantic_type?: string;
+}) => Promise<ToolResult>;

@@ -53,6 +53,7 @@ import {
     KILL_TASK_TOOL_NAME,
     WEB_SEARCH_TOOL_NAME,
     WEB_FETCH_TOOL_NAME,
+    SEMANTIC_SEARCH_TOOL_NAME,
 } from './tools';
 import { logInfo, logError, logDebug } from '../../../copilot/logger';
 import { ChatHistoryManager } from '../../chat-history-manager';
@@ -62,6 +63,7 @@ import { getCopilotSessionDir } from '../../storage-paths';
 
 // Import types from mi-core (shared with visualizer)
 import { AgentEvent, AgentEventType, FileObject, ImageObject, AgentMode } from '@wso2/mi-core';
+import { getEmbeddingService } from '../../embedding-service/src/embedding-service/vscode-service';
 
 // Re-export types for other modules that import from agent.ts
 export type { AgentEvent, AgentEventType };
@@ -152,6 +154,12 @@ export async function executeAgent(
 
     try {
         logInfo(`[Agent] Starting agent execution for project: ${request.projectPath}`);
+
+        // Kick off embedding service in background (non-blocking)
+        // This ensures the semantic search index is warm by the time the agent needs it.
+        getEmbeddingService(request.projectPath).start().catch(err => {
+            logError(`[Agent] Embedding service startup failed for ${request.projectPath}: ${err?.message || err}`);
+        });
 
         // Load chat history (reads from JSONL)
         let chatHistory: ModelMessage[] = [];
@@ -537,6 +545,11 @@ export async function executeAgent(
                             prompt: toolInput?.prompt,
                             allowed_domains: toolInput?.allowed_domains,
                             blocked_domains: toolInput?.blocked_domains,
+                        };
+                    } else if (part.toolName === SEMANTIC_SEARCH_TOOL_NAME) {
+                        displayInput = {
+                            query: toolInput?.query,
+                            semantic_type: toolInput?.semantic_type,
                         };
                     }
 

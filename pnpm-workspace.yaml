@@ -1,9 +1,34 @@
 packages:
-  - 'workspaces/*'
-  - 'workspaces/ballerina/*'
-  - 'workspaces/choreo/*'
-  - 'workspaces/wso2-platform/*'
-  - "workspaces/bi/*"
-  - 'workspaces/common-libs/*'
-  - 'workspaces/mi/*'
-  - 'workspaces/mcp-inspector/*'
+  - workspaces/*
+  - workspaces/ballerina/*
+  - workspaces/choreo/*
+  - workspaces/wso2-platform/*
+  - workspaces/bi/*
+  - workspaces/common-libs/*
+  - workspaces/mi/*
+  - workspaces/mcp-inspector/*
+
+ignoredBuiltDependencies:
+  - '@biomejs/biome'
+  - '@parcel/watcher'
+  - '@scarf/scarf'
+  - '@sentry/cli'
+  - '@swc/core'
+  - '@tree-sitter-grammars/tree-sitter-yaml'
+  - '@vscode/vsce-sign'
+  - better-sqlite3
+  - canvas
+  - core-js
+  - core-js-pure
+  - es5-ext
+  - esbuild
+  - fsevents
+  - keytar
+  - protobufjs
+  - sharp
+  - tree-sitter
+  - tree-sitter-json
+  - ttf2woff2
+  - uglifyjs-webpack-plugin
+  - unrs-resolver
+  - yarn

@@ -28,6 +28,7 @@ const { createEnvDefinePlugin } = require('../../../common/scripts/env-webpack-h
 const envPath = path.resolve(__dirname, '.env');
 const env = dotenv.config({ path: envPath }).parsed;
 console.log("Fetching values for environment variables...");
+// @ts-ignore
 const { envKeys, missingVars } = createEnvDefinePlugin(env);
 if (missingVars.length > 0) {
   console.warn(
@@ -50,7 +51,18 @@ module.exports = {
     devtoolModuleFilenameTemplate: '../[resource-path]'
   },
   externals: {
-    vscode: 'commonjs vscode'
+    vscode: 'commonjs vscode',
+    // Native / large modules loaded at runtime from node_modules (dev) or
+    // dist/node_modules/ (production VSIX — copied by scripts/copy-native-modules.js).
+    // better-sqlite3 must be rebuilt for Electron ABI via scripts/rebuild-native.js.
+    'better-sqlite3': 'commonjs better-sqlite3',
+    '@xenova/transformers': 'commonjs @xenova/transformers',
+    // onnxruntime-node must also be external so the extension bundle and
+    // @xenova/transformers share the SAME CJS module instance at runtime.
+    // This allows embedder.ts to temporarily patch InferenceSession.create
+    // to inject the desired ONNX execution providers (CoreML/MPS, CPU, etc.)
+    // before the pipeline is loaded.
+    'onnxruntime-node': 'commonjs onnxruntime-node',
   },
   resolve: {
     extensions: ['.ts', '.js'],
@@ -69,6 +81,10 @@ module.exports = {
             loader: 'ts-loader'
           }
         ]
+      },
+      {
+        test: /\.node$/,
+        use: 'node-loader'
       }
     ]
   },
@@ -85,4 +101,19 @@ module.exports = {
   infrastructureLogging: {
     level: "log",
   },
+  ignoreWarnings: [
+    // @opentelemetry/instrumentation and require-in-the-middle use dynamic require()
+    // for Node.js module hooking. This is by-design in OTel and harmless at runtime
+    // (Langfuse tracing is behind a dev flag and these modules run fine in Node/Electron).
+    { module: /@opentelemetry[\/]instrumentation/ },
+    { module: /require-in-the-middle/ },
+    // Handlebars uses the deprecated require.extensions API internally.
+    // It works correctly at runtime in Node.js/Electron; the warnings are cosmetic.
+    { module: /handlebars[\/]lib[\/]index\.js$/ },
+    // TypeScript compiler (used by ts-morph) and vscode-languageserver-types
+    // use dynamic require() in their UMD wrappers. Both work fine at runtime.
+    { module: /@ts-morph[\/]common[\/]dist[\/]typescript\.js$/ },
+    { module: /typescript[\/]lib[\/]typescript\.js$/ },
+    { module: /vscode-languageserver-types[\/]lib[\/]umd[\/]main\.js$/ },
+  ],
 };

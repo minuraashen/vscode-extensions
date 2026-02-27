@@ -35,7 +35,12 @@ import {
     FILE_READ_TOOL_NAME,
     FILE_GREP_TOOL_NAME,
     FILE_GLOB_TOOL_NAME,
+    SEMANTIC_SEARCH_TOOL_NAME,
 } from '../../../tools/types';
+import {
+    createSemanticSearchTool,
+    createSemanticSearchExecute,
+} from '../../../tools/semantic_search_tools';
 
 /**
  * Execute the Explore subagent
@@ -73,6 +78,7 @@ export async function executeExploreSubagent(
             [FILE_READ_TOOL_NAME]: createReadTool(createReadExecute(projectPath), projectPath),
             [FILE_GREP_TOOL_NAME]: createGrepTool(createGrepExecute(projectPath)),
             [FILE_GLOB_TOOL_NAME]: createGlobTool(createGlobExecute(projectPath)),
+            [SEMANTIC_SEARCH_TOOL_NAME]: createSemanticSearchTool(createSemanticSearchExecute(projectPath)),
         };
 
         logDebug(`[ExploreSubagent] Tools available: ${Object.keys(tools).join(', ')}`);
@@ -107,9 +113,10 @@ export async function executeExploreSubagent(
 
                 ## Instructions
 
-                1. Use glob and grep to efficiently find relevant files
-                2. Read files that are likely to contain the answer
-                3. Summarize your findings concisely
+                1. Use semantic_code_search FIRST to find relevant code by meaning
+                2. Fall back to glob and grep if semantic search returns no results
+                3. Read files that are likely to contain the answer
+                4. Summarize your findings concisely
 
                 Return your findings in the specified markdown format.
                 `

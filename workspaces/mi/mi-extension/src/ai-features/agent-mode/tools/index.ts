@@ -139,6 +139,14 @@ export {
     createWebFetchTool,
 } from './web_tools';
 
+// Export semantic search tools
+export {
+    // Execute function creators
+    createSemanticSearchExecute,
+    // Tool creators
+    createSemanticSearchTool,
+} from './semantic_search_tools';
+
 // Re-export tool names for convenience
 export {
     FILE_WRITE_TOOL_NAME,
@@ -164,6 +172,7 @@ export {
     TASK_OUTPUT_TOOL_NAME,
     WEB_SEARCH_TOOL_NAME,
     WEB_FETCH_TOOL_NAME,
+    SEMANTIC_SEARCH_TOOL_NAME,
 } from './types';
 
 /**

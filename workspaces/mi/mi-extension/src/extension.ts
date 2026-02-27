@@ -23,6 +23,11 @@ import { activateVisualizer } from './visualizer/activate';
 import { activateAiPanel } from './ai-features/activate';
 
 import { activateDebugger } from './debugger/activate';
+import {
+	disposeEmbeddingService,
+	disposeAllEmbeddingServices,
+	getEmbeddingService,
+} from './ai-features/agent-mode/embedding-service/src/embedding-service/vscode-service';
 import { activateMigrationSupport } from './migration';
 import { activateRuntimeService } from './runtime-services-panel/activate';
 import { MILanguageClient } from './lang-client/activator';
@@ -76,6 +81,10 @@ export async function activate(context: vscode.ExtensionContext) {
 		if (event.removed.length > 0) {
 			for (const removedProject of event.removed) {
 				disposeMIAgentPanelRpcManager(removedProject.uri.fsPath);
+				// Stop and dispose embedding service for the removed project
+				disposeEmbeddingService(removedProject.uri.fsPath).catch(err => {
+					console.warn(`[EmbeddingService] Dispose failed for ${removedProject.uri.fsPath}:`, err);
+				});
 				const webview = webviews.get(removedProject.uri.fsPath);
 				if (webview) {
 					webview.dispose();
@@ -96,10 +105,22 @@ export async function activate(context: vscode.ExtensionContext) {
 	activateVisualizer(context, firstProject);
 	activateAiPanel(context);
 
+	// Start embedding services eagerly for all workspace folders so the
+	// semantic search index is warm by the time the user opens MI Copilot.
+	// Each service is a singleton — safe to call from here and again from
+	// the OPEN_AI_PANEL command handler or executeAgent().
+	for (const folder of (workspace.workspaceFolders ?? [])) {
+		getEmbeddingService(folder.uri.fsPath).start().catch(err => {
+			console.warn(`[EmbeddingService] Background start failed for ${folder.uri.fsPath}:`, err?.message);
+		});
+	}
+
 	workspace.workspaceFolders?.forEach(folder => {
 		context.subscriptions.push(...enableLS());
 	});
+
 }
+
 
 export async function deactivate(): Promise<void> {
 	const clients = await MILanguageClient.getAllInstances();
@@ -115,6 +136,9 @@ export async function deactivate(): Promise<void> {
 			webview.dispose();
 		}
 	}
+
+	// Stop all background embedding services
+	await disposeAllEmbeddingServices();
 }
 
 export function checkForDevantExt() {
