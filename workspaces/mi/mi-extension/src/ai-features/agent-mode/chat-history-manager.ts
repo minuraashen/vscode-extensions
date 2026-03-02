@@ -22,7 +22,7 @@ import { createWriteStream, WriteStream } from 'fs';
 import { v4 as uuidv4 } from 'uuid';
 import { logDebug, logError, logInfo } from '../copilot/logger';
 import { getToolAction, capitalizeAction } from './tool-action-mapper';
-import { BASH_TOOL_NAME } from './tools/types';
+import { BASH_TOOL_NAME, SEMANTIC_SEARCH_TOOL_NAME } from './tools/types';
 import { AgentMode, UndoCheckpointSummary } from '@wso2/mi-core';
 import { getCopilotProjectStorageDir, getCopilotSessionDir } from './storage-paths';
 
@@ -1275,6 +1275,11 @@ export class ChatHistoryManager {
                                     event.bashDescription = toolInput.description;
                                     event.bashStdout = output?.stdout || output?.message;
                                     event.bashExitCode = output?.exitCode ?? 0;
+                                }
+
+                                // Add semantic search result data for semantic search tool
+                                if (part.toolName === SEMANTIC_SEARCH_TOOL_NAME && output?.semanticSearchData) {
+                                    event.semanticSearchData = output.semanticSearchData;
                                 }
 
                                 events.push(event);

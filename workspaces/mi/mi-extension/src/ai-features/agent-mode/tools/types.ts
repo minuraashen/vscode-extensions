@@ -377,12 +377,21 @@ export interface SemanticSearchResult {
     xml_element_hierarchy: string[];
     score: number;
     chunk_id: string;
+    /** Actual source code snippet for this chunk */
+    content?: string;
 }
+
+/** Overall confidence of the search result set */
+export type SemanticSearchConfidence = 'high' | 'medium' | 'low';
 
 export interface SemanticSearchResponse {
     results: SemanticSearchResult[];
     confidence_threshold: number;
     query_latency_ms: number;
+    /** Overall confidence level based on top result scores */
+    confidence: SemanticSearchConfidence;
+    /** Human-readable query string that was searched */
+    query: string;
 }
 
 export type SemanticSearchExecuteFn = (args: {

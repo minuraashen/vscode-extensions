@@ -603,6 +603,11 @@ export async function executeAgent(
                             toolResultEvent.bashRunning = !!result?.taskId;
                         }
 
+                        // Add semantic search result data for semantic search tool
+                        if (part.toolName === SEMANTIC_SEARCH_TOOL_NAME && result?.semanticSearchData) {
+                            toolResultEvent.semanticSearchData = result.semanticSearchData;
+                        }
+
                         // Send to visualizer with result action for display
                         eventHandler(toolResultEvent);
                     }

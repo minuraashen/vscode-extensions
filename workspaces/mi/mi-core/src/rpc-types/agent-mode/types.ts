@@ -23,6 +23,32 @@ import { FileObject, ImageObject } from "../../interfaces/mi-copilot";
 
 export type AgentMode = 'ask' | 'edit' | 'plan';
 
+// ============================================================================
+// Semantic Search Types (shared between extension and visualizer)
+// ============================================================================
+
+export type SemanticSearchConfidence = 'high' | 'medium' | 'low';
+
+export interface SemanticSearchChunk {
+    file_path: string;
+    line_range: [number, number];
+    xml_element_hierarchy: string[];
+    score: number;
+    chunk_id: string;
+    /** Actual source code snippet */
+    content?: string;
+}
+
+export interface SemanticSearchData {
+    query: string;
+    results: SemanticSearchChunk[];
+    confidence: SemanticSearchConfidence;
+    confidence_threshold: number;
+    query_latency_ms: number;
+    /** Whether the agent is still searching (loading state) */
+    loading?: boolean;
+}
+
 /**
  * Request to send a message to the agent
  */
@@ -243,6 +269,10 @@ export interface AgentEvent {
     bashExitCode?: number;
     /** Whether command is still running in background */
     bashRunning?: boolean;
+
+    // Semantic search tool fields (for tool_result display)
+    /** Semantic search result data for UI rendering */
+    semanticSearchData?: SemanticSearchData;
 }
 
 /**
@@ -292,6 +322,10 @@ export interface ChatHistoryEvent {
     bashStdout?: string;
     /** Shell exit code */
     bashExitCode?: number;
+
+    // Semantic search tool fields (for history display)
+    /** Semantic search result data for UI rendering */
+    semanticSearchData?: SemanticSearchData;
 }
 
 /**

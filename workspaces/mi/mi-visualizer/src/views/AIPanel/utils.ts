@@ -92,6 +92,7 @@ interface ContentSegment {
     isToolCall?: boolean;
     isTodoList?: boolean;
     isBashOutput?: boolean;
+    isSemanticSearch?: boolean;
     isCompactSummary?: boolean;
     isFileChanges?: boolean;
     isPlan?: boolean;
@@ -109,9 +110,9 @@ export function splitContent(content: string): ContentSegment[] {
     }
     const segments: ContentSegment[] = [];
     let match;
-    // Updated regex to include <toolcall>, <todolist>, <bashoutput>, <compact>, <filechanges>, <plan>, and <thinking> tags.
+    // Updated regex to include <toolcall>, <todolist>, <bashoutput>, <semanticsearch>, <compact>, <filechanges>, <plan>, and <thinking> tags.
     // Code block regex matches any language (or no language) followed by a newline
-    const regex = /```(\w*)\n([\s\S]*?)```|<toolcall([^>]*)>([^<]*?)<\/toolcall>|<todolist>([\s\S]*?)<\/todolist>|<bashoutput(?:\s+[^>]*)?>([\s\S]*?)<\/bashoutput>|<compact>([\s\S]*?)<\/compact>|<filechanges>([\s\S]*?)<\/filechanges>|<plan>([\s\S]*?)<\/plan>|<thinking(?:\s+[^>]*)?>([\s\S]*?)<\/thinking>/g;
+    const regex = /```(\w*)\n([\s\S]*?)```|<toolcall([^>]*)>([^<]*?)<\/toolcall>|<todolist>([\s\S]*?)<\/todolist>|<bashoutput(?:\s+[^>]*)?>([\s\S]*?)<\/bashoutput>|<semanticsearch(?:\s+[^>]*)?>([\s\S]*?)<\/semanticsearch>|<compact>([\s\S]*?)<\/compact>|<filechanges>([\s\S]*?)<\/filechanges>|<plan>([\s\S]*?)<\/plan>|<thinking(?:\s+[^>]*)?>([\s\S]*?)<\/thinking>/g;
     let start = 0;
 
     // Helper function to mark the last toolcall segment as complete
@@ -154,22 +155,27 @@ export function splitContent(content: string): ContentSegment[] {
             updateLastToolCallSegmentLoading();
             segments.push({ isBashOutput: true, loading: false, text: match[6] });
         } else if (match[7] !== undefined) {
+            // <semanticsearch> block matched
+            updateLastToolCallSegmentLoading();
+            const isLoading = /data-loading="true"/.test(match[0]);
+            segments.push({ isSemanticSearch: true, loading: isLoading, text: match[7] });
+        } else if (match[8] !== undefined) {
             // <compact> block matched
             updateLastToolCallSegmentLoading();
-            segments.push({ isCompactSummary: true, loading: false, text: match[7] });
-        } else if (match[8] !== undefined) {
+            segments.push({ isCompactSummary: true, loading: false, text: match[8] });
+        } else if (match[9] !== undefined) {
             // <filechanges> block matched
             updateLastToolCallSegmentLoading();
-            segments.push({ isFileChanges: true, loading: false, text: match[8] });
-        } else if (match[9] !== undefined) {
+            segments.push({ isFileChanges: true, loading: false, text: match[9] });
+        } else if (match[10] !== undefined) {
             // <plan> block matched
             updateLastToolCallSegmentLoading();
-            segments.push({ isPlan: true, loading: false, text: match[9] });
-        } else if (match[10] !== undefined) {
+            segments.push({ isPlan: true, loading: false, text: match[10] });
+        } else if (match[11] !== undefined) {
             // <thinking> block matched
             updateLastToolCallSegmentLoading();
             const isLoading = /data-loading="true"/.test(match[0]);
-            segments.push({ isThinking: true, loading: isLoading, text: match[10] });
+            segments.push({ isThinking: true, loading: isLoading, text: match[11] });
         }
         start = regex.lastIndex;
     }

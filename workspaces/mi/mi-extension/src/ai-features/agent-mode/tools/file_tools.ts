@@ -1506,12 +1506,11 @@ const readInputSchema = z.object({
 export function createReadTool(execute: ReadExecuteFn, projectPath: string) {
     // Type assertion to avoid TypeScript deep instantiation issues with Zod
     return (tool as any)({
-        description: `Reads a file from the project.
+        description: `Reads a specific file from the project by exact path.
             Text files return line-numbered content (supports offset/limit).
             Image files (.png, .jpg, .jpeg, .gif, .webp) are provided for multimodal analysis.
             PDFs can be read with pages ("N" or "N-M"). For PDFs over ${PDF_MAX_PAGES_PER_REQUEST} pages, pages is required. Maximum ${PDF_MAX_PAGES_PER_REQUEST} pages per request.
-            ALWAYS read a file before editing it.
-            You can speculatively read multiple files in parallel.`,
+            IMPORTANT: Do NOT use this as the first tool when exploring or answering questions about the project — use semantic_code_search first. Only use file_read when: (1) you already have the exact file path from semantic search results and need full content for editing, (2) semantic search returned CONFIDENCE: LOW or 0 results, or (3) the file is an image or PDF. ALWAYS read a file before editing it.`,
         inputSchema: readInputSchema,
         execute,
         toModelOutput: async ({ input, output }: { input: { file_path?: string; pages?: string }; output: unknown }) => {

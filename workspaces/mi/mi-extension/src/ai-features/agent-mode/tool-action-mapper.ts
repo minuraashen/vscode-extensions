@@ -203,12 +203,19 @@ export function getToolAction(toolName: string, toolResult?: any, toolInput?: an
                 failed: 'web fetch failed'
             };
 
-        case SEMANTIC_SEARCH_TOOL_NAME:
+        case SEMANTIC_SEARCH_TOOL_NAME: {
+            // Reflect confidence in the completed action if available
+            const confidence = toolResult?.semanticSearchData?.confidence;
+            const resultCount = toolResult?.semanticSearchData?.results?.length;
+            const completedText = confidence && resultCount !== undefined
+                ? `found ${resultCount} chunk${resultCount !== 1 ? 's' : ''} (${confidence} confidence)`
+                : 'searched codebase';
             return {
                 loading: 'searching codebase',
-                completed: 'searched codebase',
+                completed: completedText,
                 failed: 'semantic search failed'
             };
+        }
 
         default:
             return undefined;

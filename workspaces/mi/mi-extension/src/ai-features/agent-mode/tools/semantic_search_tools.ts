@@ -18,10 +18,12 @@
 
 import { tool } from 'ai';
 import { z } from 'zod';
+import * as fs from 'fs';
 import {
     ToolResult,
     SemanticSearchResult,
     SemanticSearchResponse,
+    SemanticSearchConfidence,
     SemanticSearchExecuteFn,
     SEMANTIC_SEARCH_TOOL_NAME,
 } from './types';
@@ -52,6 +54,50 @@ const MMR_LAMBDA = 0.7;
 
 /** Overlap threshold for deduplication (fraction of line range overlap) */
 const OVERLAP_THRESHOLD = 0.5;
+
+/** Score above which confidence is considered "high" */
+const HIGH_CONFIDENCE_THRESHOLD = 0.65;
+
+/** Score above which confidence is considered "medium" */
+const MEDIUM_CONFIDENCE_THRESHOLD = 0.40;
+
+// ============================================================================
+// File Content Reader
+// ============================================================================
+
+/**
+ * Read specific line range from a file (1-based, inclusive).
+ * Returns the extracted lines as a string, or an empty string on error.
+ */
+function readFileLines(filePath: string, startLine: number, endLine: number): string {
+    try {
+        const content = fs.readFileSync(filePath, 'utf8');
+        const lines = content.split('\n');
+        // Convert 1-based to 0-based index
+        const start = Math.max(0, startLine - 1);
+        const end = Math.min(lines.length - 1, endLine - 1);
+        return lines.slice(start, end + 1).join('\n');
+    } catch {
+        return '';
+    }
+}
+
+/**
+ * Determine confidence level based on top result scores.
+ */
+function computeConfidence(results: SemanticSearchResult[]): SemanticSearchConfidence {
+    if (results.length === 0) {
+        return 'low';
+    }
+    const topScore = results[0].score;
+    if (topScore >= HIGH_CONFIDENCE_THRESHOLD) {
+        return 'high';
+    }
+    if (topScore >= MEDIUM_CONFIDENCE_THRESHOLD) {
+        return 'medium';
+    }
+    return 'low';
+}
 
 // ============================================================================
 // Core Search Logic
@@ -357,21 +403,25 @@ export function createSemanticSearchExecute(projectPath: string): SemanticSearch
             // 10. Deduplicate overlapping chunks
             const deduplicated = deduplicateOverlapping(reranked);
 
-            // 11. Build response
+            // 11. Build response — include actual source snippet for each chunk
             const results: SemanticSearchResult[] = deduplicated.slice(0, effectiveK).map(s => ({
                 file_path: s.chunk.filePath,
                 line_range: [s.chunk.startLine, s.chunk.endLine] as [number, number],
                 xml_element_hierarchy: buildXmlHierarchy(s.chunk),
                 score: Math.round(s.hybridScore * 10000) / 10000,
                 chunk_id: `${s.chunk.id}`,
+                content: readFileLines(s.chunk.filePath, s.chunk.startLine, s.chunk.endLine),
             }));
 
             const latencyMs = Date.now() - startTime;
+            const confidence = computeConfidence(results);
 
             const response: SemanticSearchResponse = {
                 results,
                 confidence_threshold: threshold,
                 query_latency_ms: latencyMs,
+                confidence,
+                query,
             };
 
             if (results.length === 0) {
@@ -385,19 +435,34 @@ export function createSemanticSearchExecute(projectPath: string): SemanticSearch
                 };
             }
 
-            // Format result for the agent (metadata only, no raw source)
-            const formattedResults = results.map((r, i) =>
-                `${i + 1}. [${r.score}] ${r.file_path}:${r.line_range[0]}-${r.line_range[1]}\n` +
-                `   Hierarchy: ${r.xml_element_hierarchy.join(' → ')}`
-            ).join('\n');
+            // Build XML artifact blocks containing actual code snippets for the agent
+            const xmlArtifacts = results.map((r, i) => {
+                const hierarchy = r.xml_element_hierarchy.join(' → ');
+                const contentBlock = r.content
+                    ? `\n<source_content>\n${r.content}\n</source_content>`
+                    : '';
+                return (
+                    `<code_chunk index="${i + 1}" score="${r.score}" file="${r.file_path}" ` +
+                    `lines="${r.line_range[0]}-${r.line_range[1]}" hierarchy="${hierarchy}">${contentBlock}\n</code_chunk>`
+                );
+            }).join('\n\n');
+
+            const confidenceNote = confidence === 'low'
+                ? '\n\nCONFIDENCE: LOW — top scores are weak. If chunks do not seem relevant, ' +
+                  'use grep and file_read as fallback tools.'
+                : confidence === 'medium'
+                    ? '\n\nCONFIDENCE: MEDIUM — results look reasonable but verify with file_read if needed.'
+                    : '\n\nCONFIDENCE: HIGH — results are highly relevant.';
 
             return {
                 success: true,
                 message:
                     `Found ${results.length} result(s) for "${query}" ` +
-                    `(${latencyMs}ms, threshold: ${threshold}):\n\n${formattedResults}\n\n` +
-                    `Use file_read to inspect specific file contents at the indicated line ranges.`,
-            };
+                    `(${latencyMs}ms, threshold: ${threshold}, confidence: ${confidence}):\n\n` +
+                    `<search_results>\n${xmlArtifacts}\n</search_results>` +
+                    confidenceNote,
+                semanticSearchData: response,
+            } as any;
 
         } catch (error) {
             const latencyMs = Date.now() - startTime;
@@ -449,10 +514,11 @@ export function createSemanticSearchTool(execute: SemanticSearchExecuteFn) {
     return (tool as any)({
         description:
             'Search the MI project codebase using semantic similarity. ' +
-            'Returns file paths, line ranges, and XML element hierarchy for matching code chunks. ' +
+            'Returns file paths, line ranges, XML element hierarchy, AND actual source code snippets for matching chunks. ' +
             'Use this as the PRIMARY code search tool for understanding project structure, ' +
             'finding relevant configurations, APIs, sequences, endpoints, and mediators. ' +
-            'Results contain metadata only — use file_read with the returned line ranges to read actual content. ' +
+            'Results include inline code content — make decisions directly from the returned chunks. ' +
+            'Only fall back to file_read/grep if confidence is LOW or results seem irrelevant. ' +
             'Falls back gracefully if the semantic index is unavailable.',
         inputSchema,
         execute,
