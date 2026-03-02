@@ -67,10 +67,10 @@ export class XMLChunker {
   private embedder: any;
   private registry: ArtifactRegistry;
 
-  constructor(embedder?: any, registry?: ArtifactRegistry) {
+  constructor(embedder?: any, registry?: ArtifactRegistry, maxTokens?: number) {
     this.embedder = embedder;
     this.registry = registry || artifactRegistry;
-    this.maxTokens = 256;
+    this.maxTokens = maxTokens ?? 256;
   }
 
   async chunkFile(filePath: string): Promise<XMLChunk[]> {
@@ -216,19 +216,20 @@ export class XMLChunker {
   }
 
   /**
-   * Check if element has complex nested structure (multiple distinct child tags)
+   * Check if element has complex nested structure (multiple distinct child tags).
+   * With preserveOrder:true, element is an array of { tagName: [...], ':@': {} } objects.
    */
   private hasComplexStructure(element: any): boolean {
-    if (!element || typeof element !== 'object') return false;
+    if (!Array.isArray(element)) return false;
 
-    // Count distinct child tags (exclude attributes, text, processing instructions)
-    const childTags = Object.keys(element).filter(key =>
-      !key.startsWith(':@') &&
-      !key.startsWith('#') &&
-      !key.startsWith('?')
+    // Collect distinct child tag names (skip the attribute bag ':@')
+    const childTags = new Set(
+      element
+        .map((item: any) => Object.keys(item).find(k => k !== ':@'))
+        .filter(Boolean)
     );
 
-    return childTags.length >= 2;
+    return childTags.size >= 2;
   }
 
   /**
@@ -338,17 +339,19 @@ export class XMLChunker {
         this.isMediatorType(tagName);
 
       if (isChunkable) {
-        // Token gating: Check if subtree fits within limit
-        const range = this.findElementRange(tagName, this.getNodeName(tagName, element), lines);
+        const range = this.findElementRange(tagName, lines);
         const content = this.extractContent(lines, range);
-        // CRITICAL: Use parent context (not updatedContext) to avoid duplication
-        // The chunk's own attributes are already in the content, so we should NOT include them in metadata
-        const metadata = this.formatMetadata(context);
-        const tokenCount = this.countTokens(content, metadata);
+        // Compute embeddingText before the token gate so the gate operates on the
+        // actual cleaned text the model will see, not raw XML with angle brackets.
+        // CRITICAL: Use parent context (not updatedContext) to avoid duplication.
+        const resourceName = nodeAttrs.name || nodeAttrs['@_name'] || nodeAttrs.key || nodeAttrs['@_key'] ||
+          nodeAttrs.context || nodeAttrs['@_context'] || tagName;
+        const embeddingText = this.createEmbeddingText(tagName, resourceName, content, nodeAttrs, context);
+        const tokenCount = this.countTokens(embeddingText);
 
         if (tokenCount <= this.maxTokens) {
           // Subtree fits → Emit chunk with parent context (not updatedContext)
-          this.createChunk(tagName, nodeAttrs, content, range, filePath, chunks, parentChunkId, context);
+          this.createChunk(tagName, nodeAttrs, content, range, filePath, chunks, parentChunkId, context, embeddingText);
         } else {
           // Subtree too large → Descend to children with updated context, passing THIS tag as parent
           if (Array.isArray(element)) {
@@ -359,13 +362,12 @@ export class XMLChunker {
             // this is a leaf-like node that exceeds maxTokens.
             // Force-emit it as a chunk rather than silently dropping content.
             if (chunks.length === childChunksBefore) {
-              this.createChunk(tagName, nodeAttrs, content, range, filePath, chunks, parentChunkId, context);
+              this.createChunk(tagName, nodeAttrs, content, range, filePath, chunks, parentChunkId, context, embeddingText);
             }
           } else {
             // Atomic node with no children that exceeds maxTokens → force-emit
-            const range = this.findElementRange(tagName, this.getNodeName(tagName, element), lines);
-            const content = this.extractContent(lines, range);
-            this.createChunk(tagName, nodeAttrs, content, range, filePath, chunks, parentChunkId, context);
+            // reuse the already-computed range, content, and embeddingText
+            this.createChunk(tagName, nodeAttrs, content, range, filePath, chunks, parentChunkId, context, embeddingText);
           }
         }
       } else if (Array.isArray(element)) {
@@ -377,7 +379,7 @@ export class XMLChunker {
         // returns the text content as a raw string, not an array — so the normal
         // isChunkable path never fires for it. Handle it explicitly here.
         // We find its range and emit a chunk so no config property is ever silently dropped.
-        const range = this.findElementRange(tagName, tagName, lines);
+        const range = this.findElementRange(tagName, lines);
         const content = this.extractContent(lines, range);
         if (content.trim().length > 0) {
           this.createChunk(tagName, nodeAttrs, content, range, filePath, chunks, parentChunkId, context);
@@ -446,51 +448,6 @@ export class XMLChunker {
   }
 
   /**
-   * Extract identifying attributes from any element
-   * These are attributes that help identify or describe what the element does
-   */
-  private extractIdentifyingAttributes(attrs: Record<string, string>): Record<string, any> {
-    const identifyingAttrs: Record<string, any> = {};
-
-    // Common identifying attribute patterns
-    const identifyingKeys = [
-      'name', '@_name',
-      'id', '@_id',
-      'key', '@_key',
-      'xpath', '@_xpath',
-      'source', '@_source',
-      'regex', '@_regex',
-      'type', '@_type',
-      'expression', '@_expression',
-      'value', '@_value',
-      'media-type', '@_media-type',
-      'category', '@_category',
-      'level', '@_level',
-      'target', '@_target',
-      'uri', '@_uri',
-      'method', '@_method',
-    ];
-
-    // Extract all identifying attributes that are present
-    for (const key of identifyingKeys) {
-      if (attrs[key]) {
-        // Remove the '@_' prefix for cleaner context keys
-        const cleanKey = key.startsWith('@_') ? key.substring(2) : key;
-        identifyingAttrs[cleanKey] = attrs[key];
-      }
-    }
-
-    // Also capture namespaced attributes (e.g., throttle:type)
-    for (const [key, value] of Object.entries(attrs)) {
-      if (key.includes(':') && !key.startsWith(':@')) {
-        identifyingAttrs[key] = value;
-      }
-    }
-
-    return identifyingAttrs;
-  }
-
-  /**
    * Create a chunk from the current node
    */
   private createChunk(
@@ -501,13 +458,14 @@ export class XMLChunker {
     filePath: string,
     chunks: XMLChunk[],
     parentChunkId: number | null,
-    context: SemanticContext
+    context: SemanticContext,
+    precomputedEmbeddingText?: string
   ): void {
     const resourceName = attrs.name || attrs['@_name'] || attrs.key || attrs['@_key'] ||
       attrs.context || attrs['@_context'] || tagName;
     const chunkIndex = this.chunkCounter++;
 
-    const embeddingText = this.createEmbeddingText(tagName, resourceName, content, attrs, context);
+    const embeddingText = precomputedEmbeddingText ?? this.createEmbeddingText(tagName, resourceName, content, attrs, context);
     const semanticType = this.mapToSemanticType(tagName);
     const semanticIntent = this.inferIntent(tagName, attrs, content);
     const contentHash = computeChunkHash(content, {
@@ -518,9 +476,6 @@ export class XMLChunker {
 
     // Extract references from this chunk's content
     const chunkReferences = this.extractReferencesFromContent(content);
-    if (chunkReferences.length > 0) {
-      context.references = chunkReferences;
-    }
 
     // Detect if this is a standalone artifact definition
     const standaloneTypes = ['sequence', 'localEntry', 'endpoint', 'template'];
@@ -614,25 +569,16 @@ export class XMLChunker {
   }
 
   /**
-   * Count tokens using the model's tokenizer
+   * Count tokens using the model's tokenizer.
+   * Receives the already-built embeddingText so the gate operates on the
+   * exact same text that will be sent to the embedding model.
    */
-  private countTokens(content: string, metadata: string = ''): number {
-    const fullText = metadata + ' ' + content;
-
+  private countTokens(text: string): number {
     if (this.embedder && this.embedder.countTokens) {
-      return this.embedder.countTokens(fullText);
+      return this.embedder.countTokens(text);
     }
     // Fallback to character approximation (~4 chars per token)
-    return Math.ceil(fullText.length / 4);
-  }
-
-  /**
-   * Extract node name from element attributes
-   */
-  private getNodeName(tagName: string, element: any): string {
-    const attrs = this.extractAttributes(element);
-    return attrs.name || attrs['@_name'] || attrs.key || attrs['@_key'] ||
-      attrs.context || attrs['@_context'] || tagName;
+    return Math.ceil(text.length / 4);
   }
 
   /**
@@ -694,37 +640,23 @@ export class XMLChunker {
     return key.charAt(0).toUpperCase() + key.slice(1);
   }
 
-  private extractAttributes(element: any): Record<string, string> {
-    const attrs: Record<string, string> = {};
-
-    if (Array.isArray(element)) {
-      for (const item of element) {
-        if (item[':@']) {
-          Object.assign(attrs, item[':@']);
-          break;
-        }
-      }
-    } else if (element && element[':@']) {
-      Object.assign(attrs, element[':@']);
-    }
-
-    return attrs;
-  }
-
   /**
    * Find the line range for an XML element
    * Automatically includes structural wrapper elements (onAccept, onReject, then, else, etc.)
    */
-  private findElementRange(tagName: string, resourceName: string, lines: string[]): LineRange {
+  private findElementRange(tagName: string, lines: string[]): LineRange {
     let startLine = -1;
     let endLine = -1;
     let depth = 0;
+
+    // Escape regex metacharacters in tagName (e.g. '.' in 'http.post' must not match any char)
+    const escapedTag = tagName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
     for (let i = this.lastSearchPosition; i < lines.length; i++) {
       const line = lines[i];
 
       if (startLine === -1) {
-        const openPattern = new RegExp(`<${tagName}[\\s>/]`);
+        const openPattern = new RegExp(`<${escapedTag}[\\s>/]`);
         if (openPattern.test(line)) {
           startLine = i + 1;
           this.lastSearchPosition = i + 1;
@@ -736,8 +668,8 @@ export class XMLChunker {
           depth = 1;
         }
       } else {
-        const openPattern = new RegExp(`<${tagName}[\\s>]`);
-        const closePattern = new RegExp(`</${tagName}>`);
+        const openPattern = new RegExp(`<${escapedTag}[\\s>]`);
+        const closePattern = new RegExp(`</${escapedTag}>`);
 
         if (openPattern.test(line) && !line.includes('/>')) {
           depth++;
@@ -911,7 +843,6 @@ export class XMLChunker {
 
     tokens.push(...contentTokens);
 
-    // Increased limit from 150 to 200 for better context representation
-    return tokens.slice().join(' ');
+    return tokens.join(' ');
   }
 }
