@@ -1,27 +1,23 @@
 import * as fs from 'fs';
 import { XMLParser } from 'fast-xml-parser';
-import { computeChunkHash } from '../db/merkle';
-import { ArtifactRegistry, artifactRegistry, ArtifactMetadata } from './artifact-registry';
+import { createHash } from 'crypto';
 
 /**
  * Semantic, Hierarchical, Structure-Aware XML Chunker for WSO2 MI artifacts
- * 
- * Uses plugin-based ArtifactRegistry for extensible artifact detection.
+ *
+ * Pure parsed-tree traversal — no external registry or heuristic rules.
+ * Token count alone drives chunk boundaries; artifact metadata is read
+ * directly from the XML root element's attributes.
  */
 
 export interface XMLChunk {
   filePath: string;
-  resourceName: string;
-  resourceType: string;
   chunkType: string;
   chunkIndex: number;
   startLine: number;
   endLine: number;
   content: string;
-  parentChunkId: number | null;
   embeddingText: string;
-  semanticType: string;
-  semanticIntent: string;
   contentHash: string;
   context: SemanticContext;
   sequenceKey?: string;
@@ -31,14 +27,13 @@ export interface XMLChunk {
 
 /**
  * Semantic context — fully generic, schema-agnostic.
- * 
+ *
  * DESIGN: Only two explicit fields exist:
- *   - `artifact`: Root-level artifact metadata (detected via registry or heuristics)
+ *   - `artifact`: Root-level artifact metadata (read from the XML root element)
  *   - `references`: Cross-artifact references extracted from content
- * 
- * All other context (resource boundaries, sequence names, filters, etc.) is stored
- * dynamically via the `[key: string]: any` index signature. This means the chunker
- * works identically for `<api>/<resource>/<inSequence>` and `<aaappp>/<reesss>/<insq>`.
+ *
+ * All other context is stored dynamically via the `[key: string]: any` index
+ * signature — making the chunker work identically for any XML schema.
  */
 export interface SemanticContext {
   // Root-level artifact metadata (always present)
@@ -65,11 +60,9 @@ export class XMLChunker {
   private lastSearchPosition: number = 0;
   private readonly maxTokens: number;
   private embedder: any;
-  private registry: ArtifactRegistry;
 
-  constructor(embedder?: any, registry?: ArtifactRegistry, maxTokens?: number) {
+  constructor(embedder?: any, maxTokens?: number) {
     this.embedder = embedder;
-    this.registry = registry || artifactRegistry;
     this.maxTokens = maxTokens ?? 256;
   }
 
@@ -82,7 +75,7 @@ export class XMLChunker {
     const parser = new XMLParser({
       ignoreAttributes: false,
       attributeNamePrefix: '',
-      removeNSPrefix: false, // Must preserve namespace for accurate heuristics (e.g., wsp:Policy)
+      removeNSPrefix: false, // Must preserve namespace for accurate context (e.g., wsp:Policy)
       preserveOrder: true,
       alwaysCreateTextNode: false,
     });
@@ -90,169 +83,44 @@ export class XMLChunker {
     const parsed = parser.parse(xmlContent);
     const chunks: XMLChunk[] = [];
 
-    // Detect artifact type using registry
-    const rootContext = this.buildRootContext(parsed, filePath);
+    // Build root context from the parsed tree
+    const rootContext = this.buildRootContext(parsed);
 
-    this.processNode(parsed, lines, filePath, chunks, null, rootContext);
+    this.processNode(parsed, lines, filePath, chunks, rootContext);
 
     return chunks;
   }
 
   /**
-   * Build root context by detecting artifact type from XML
-   * Uses registry instead of path-based detection
+   * Build root context directly from the parsed XML tree.
+   * Reads the first real root element and captures its tag name + all attributes.
+   * No registry — the tree already has everything we need.
    */
-  private buildRootContext(parsed: any, filePath: string): SemanticContext {
+  private buildRootContext(parsed: any): SemanticContext {
     const context: SemanticContext = {};
 
-    // Try to detect artifact type from XML structure
-    const detected = this.registry.detectArtifactType(parsed);
+    if (!Array.isArray(parsed)) {
+      context.artifact = { type: 'unknown', name: 'unknown' };
+      return context;
+    }
 
-    if (detected) {
-      const { metadata } = detected;
+    // Find the first real element (skip ?xml processing instructions)
+    const rootItem = parsed.find(item => {
+      const key = Object.keys(item).find(k => k !== ':@');
+      return key && !key.startsWith('?');
+    });
 
-      // UNIFORM: All artifact types stored in context.artifact
-      // No special-casing for api/proxy/sequence — fully generic
-      context.artifact = {
-        type: metadata.type,
-        name: metadata.name,
-        xmlns: metadata.xmlns,
-        ...metadata.additionalInfo,
-      };
+    if (rootItem) {
+      const rootTag = Object.keys(rootItem).find(k => k !== ':@') || 'unknown';
+      const rootAttrs = this.extractAllAttributes(rootItem[':@'] || {});
+      const name = rootAttrs.name || rootAttrs.key || rootTag;
+      context.artifact = { type: rootTag, name, ...rootAttrs };
     } else {
-      // Fallback: detect any artifact (including custom/unregistered types)
-      // Pass filePath to infer type from folder structure
-      const anyArtifact = this.registry.detectAnyArtifact(parsed, filePath);
-      if (anyArtifact) {
-        context.artifact = {
-          type: anyArtifact.type,
-          name: anyArtifact.name,
-          xmlns: anyArtifact.xmlns,
-          ...anyArtifact.additionalInfo,
-        };
-      } else {
-        // Ultimate fallback if parsing completely fails
-        context.artifact = {
-          type: 'unknown',
-          name: 'unknown',
-        };
-      }
+      context.artifact = { type: 'unknown', name: 'unknown' };
     }
 
     return context;
   }
-
-  /**
-   * SEMANTIC BOUNDARY DETECTION (Registry-Based)
-   * 
-   * Queries the artifact registry instead of hardcoded lists.
-   * Falls back to heuristics for unknown tags.
-   */
-  private isSemanticBoundary(tagName: string, attrs: Record<string, string> = {}, element?: any, parentTagName?: string): boolean {
-    const localName = tagName.split(':').pop() || tagName;
-
-    // 1. Registry Lookup (Explicit)
-    // Check both full name (wsp:Policy) and local name (Policy)
-    if (this.registry.isSemanticBoundary(tagName) || this.registry.isSemanticBoundary(localName)) {
-      return true;
-    }
-
-    // 2. Dot Notation Rule (Mediators & Connectors)
-    // e.g., http.post, google.spreadsheet, ENTC.agent
-    // The dot is part of the tag name, NOT a namespace separator in this context
-    if (tagName.includes('.')) {
-      return true;
-    }
-
-    // 3. Namespace Pattern Rule (WS-* & Extensions)
-    // Matches: lowercase_prefix:CamelCaseLocalName
-    // e.g., wsp:Policy, throttle:ThrottleAssertion
-    if (tagName.includes(':')) {
-      const [prefix, localNamePart] = tagName.split(':', 2);
-      // Heuristic: Prefix is lowercase alpha, LocalName starts with Uppercase
-      const isNamespacePattern = /^[a-z]+$/.test(prefix) && /^[A-Z]/.test(localNamePart);
-      if (isNamespacePattern) {
-        return true;
-      }
-    }
-
-    // 4. CamelCase Config Rule (Declarative Configuration)
-    // e.g., Filter, ThrottleAssertion, MaximumConcurrentAccess
-    // Legacy support for tags that behave like classes/objects
-    // Exclude simple lowercase tags unless they match specific keywords
-    if (/^[A-Z]/.test(localName) && !localName.includes('.')) {
-      return true;
-    }
-
-    // 5. Standard Data Service / Flow Keywords
-    const standardKeywords = ['query', 'operation', 'resource', 'config', 'validate', 'header'];
-    if (standardKeywords.includes(localName)) {
-      return true;
-    }
-
-    // 6. Universal Fallback (The Safety Net)
-    // Rule A: Has identifying attributes (name, key, id, etc.)
-    const attrCount = Object.keys(attrs).filter(k => !k.startsWith('#')).length;
-    if (attrCount > 0) {
-      return true;
-    }
-
-    // Rule B: Structural Complexity (Has multiple distinct children)
-    // If it contains logic/structure, it's likely a container we want to chunk
-    if (element && this.hasComplexStructure(element)) {
-      return true;
-    }
-
-    // 7. Connector Child Rule (General)
-    // If the immediate parent is a connector/mediator with a dot in its tag name
-    // (e.g., <ai.agent>, <http.post>, <email.send>), ALL direct children are
-    // configuration properties of that connector and should be chunked together.
-    // This is purely structural — no hardcoded tag names anywhere.
-    if (parentTagName && parentTagName.includes('.')) {
-      return true;
-    }
-
-    return false;
-  }
-
-  /**
-   * Check if element has complex nested structure (multiple distinct child tags).
-   * With preserveOrder:true, element is an array of { tagName: [...], ':@': {} } objects.
-   */
-  private hasComplexStructure(element: any): boolean {
-    if (!Array.isArray(element)) return false;
-
-    // Collect distinct child tag names (skip the attribute bag ':@')
-    const childTags = new Set(
-      element
-        .map((item: any) => Object.keys(item).find(k => k !== ':@'))
-        .filter(Boolean)
-    );
-
-    return childTags.size >= 2;
-  }
-
-  /**
-   * Check if tag is a resource type (uses registry)
-   */
-  private isResourceType(tagName: string): boolean {
-    const localName = tagName.split(':').pop() || tagName;
-    return this.registry.isResourceType(tagName) || this.registry.isResourceType(localName);
-  }
-
-  /**
-   * Check if tag is a mediator type (uses registry)
-   */
-  private isMediatorType(tagName: string): boolean {
-    const localName = tagName.split(':').pop() || tagName;
-    // Query registry
-    if (this.registry.isMediatorTag(tagName) || this.registry.isMediatorTag(localName)) {
-      return true;
-    }
-    // Heuristic: http.* patterns are mediators
-    return tagName.startsWith('http.');
-  }
-
 
   /**
    * Extract cross-artifact references from a chunk's XML content.
@@ -303,19 +171,17 @@ export class XMLChunker {
   }
 
   /**
-   * EXCLUSIVE TOP-DOWN CHUNKING with token gating
-   * 
-   * Fully structure-based: chunkability is determined by registry + heuristics,
-   * never by hardcoded tag names. Includes oversized leaf fallback.
+   * PURE TREE TRAVERSAL with token gating
+   *
+   * Every XML tag is a potential chunk boundary — no heuristics, no registry rules.
+   * Token count alone decides: fits → chunk, too big → descend into children.
    */
   private processNode(
     node: any,
     lines: string[],
     filePath: string,
     chunks: XMLChunk[],
-    parentChunkId: number | null,
-    context: SemanticContext,
-    parentTagName?: string  // Tag name of the element that triggered this descent
+    context: SemanticContext
   ): void {
     if (!Array.isArray(node)) return;
 
@@ -323,109 +189,65 @@ export class XMLChunker {
       const tagName = Object.keys(item).find(key => key !== ':@') || '';
       if (!tagName) continue;
 
-      // Skip XML declaration and other processing instructions
-      if (tagName.startsWith('?xml')) continue;
+      // Skip XML declaration, processing instructions, and #text pseudo-nodes
+      // (#text is created by fast-xml-parser for mixed content — not a real XML tag)
+      if (tagName.startsWith('?xml') || tagName === '#text') continue;
 
       const element = item[tagName];
       const nodeAttrs = item[':@'] || {};
 
-      // Update context for THIS node (will be passed to children)
+      // Update context for this node — passed to children if we descend
       const updatedContext = this.updateContext(tagName, nodeAttrs, context);
 
-      // Check if this is a chunkable node
-      // Pass parentTagName so Rule 7 (Connector Child) can fire for scalar children of connectors
-      const isChunkable = this.isResourceType(tagName) ||
-        this.isSemanticBoundary(tagName, nodeAttrs, element, parentTagName) ||
-        this.isMediatorType(tagName);
+      // Token gate: measure the full subtree content as embeddingText
+      // Use parent context (not updatedContext) — the chunk's own tag is already in content
+      const range = this.findElementRange(tagName, lines);
+      const content = this.extractContent(lines, range);
+      const embeddingText = this.createEmbeddingText(content, context);
+      const tokenCount = this.countTokens(embeddingText);
 
-      if (isChunkable) {
-        const range = this.findElementRange(tagName, lines);
-        const content = this.extractContent(lines, range);
-        // Compute embeddingText before the token gate so the gate operates on the
-        // actual cleaned text the model will see, not raw XML with angle brackets.
-        // CRITICAL: Use parent context (not updatedContext) to avoid duplication.
-        const resourceName = nodeAttrs.name || nodeAttrs['@_name'] || nodeAttrs.key || nodeAttrs['@_key'] ||
-          nodeAttrs.context || nodeAttrs['@_context'] || tagName;
-        const embeddingText = this.createEmbeddingText(tagName, resourceName, content, nodeAttrs, context);
-        const tokenCount = this.countTokens(embeddingText);
-
-        if (tokenCount <= this.maxTokens) {
-          // Subtree fits → Emit chunk with parent context (not updatedContext)
-          this.createChunk(tagName, nodeAttrs, content, range, filePath, chunks, parentChunkId, context, embeddingText);
-        } else {
-          // Subtree too large → Descend to children with updated context, passing THIS tag as parent
-          if (Array.isArray(element)) {
-            const childChunksBefore = chunks.length;
-            this.processNode(element, lines, filePath, chunks, parentChunkId, updatedContext, tagName);
-
-            // OVERSIZED LEAF FALLBACK: If no children produced any chunks,
-            // this is a leaf-like node that exceeds maxTokens.
-            // Force-emit it as a chunk rather than silently dropping content.
-            if (chunks.length === childChunksBefore) {
-              this.createChunk(tagName, nodeAttrs, content, range, filePath, chunks, parentChunkId, context, embeddingText);
-            }
-          } else {
-            // Atomic node with no children that exceeds maxTokens → force-emit
-            // reuse the already-computed range, content, and embeddingText
-            this.createChunk(tagName, nodeAttrs, content, range, filePath, chunks, parentChunkId, context, embeddingText);
-          }
-        }
+      if (tokenCount <= this.maxTokens) {
+        // Fits → emit this node as a chunk, stop descending
+        this.createChunk(tagName, nodeAttrs, content, range, filePath, chunks, context, embeddingText);
       } else if (Array.isArray(element)) {
-        // Non-chunkable container → traverse children, passing THIS tag as the parent
-        this.processNode(element, lines, filePath, chunks, parentChunkId, updatedContext, tagName);
-      } else if (typeof element === 'string' && element.trim().length > 0 && parentTagName && parentTagName.includes('.')) {
-        // LEAF TEXT NODE inside a connector (e.g., <role> inside <ai.agent>):
-        // The parent connector made this node chunkable via Rule 7, but fast-xml-parser
-        // returns the text content as a raw string, not an array — so the normal
-        // isChunkable path never fires for it. Handle it explicitly here.
-        // We find its range and emit a chunk so no config property is ever silently dropped.
-        const range = this.findElementRange(tagName, lines);
-        const content = this.extractContent(lines, range);
-        if (content.trim().length > 0) {
-          this.createChunk(tagName, nodeAttrs, content, range, filePath, chunks, parentChunkId, context);
+        // Too large → descend into children
+        const childChunksBefore = chunks.length;
+        this.processNode(element, lines, filePath, chunks, updatedContext);
+
+        // Oversized leaf fallback: if no children produced chunks, force-emit this node
+        if (chunks.length === childChunksBefore) {
+          this.createChunk(tagName, nodeAttrs, content, range, filePath, chunks, context, embeddingText);
         }
+      } else {
+        // Leaf node (no children) that exceeds token limit → force-emit
+        this.createChunk(tagName, nodeAttrs, content, range, filePath, chunks, context, embeddingText);
       }
     }
   }
 
   /**
-   * Update semantic context as we traverse the tree
-   * FULLY GENERIC: No hardcoded tag names. Uses registry for artifact roots,
-   * attribute-based heuristics for all other elements.
+   * Update semantic context as we traverse the tree.
+   * FULLY GENERIC: reads directly from the parsed tree — no registry.
    */
   private updateContext(tagName: string, attrs: Record<string, string>, parentContext: SemanticContext): SemanticContext {
     const newContext = { ...parentContext };
     const localName = tagName.split(':').pop() || tagName;
 
-    // 1. Check if this is a REGISTERED ARTIFACT ROOT TAG (via registry)
-    //    e.g., api, proxy, sequence, endpoint, inboundEndpoint, data, etc.
-    const plugin = this.registry.getPluginForRootTag(tagName) || this.registry.getPluginForRootTag(localName);
-    if (plugin) {
-      // Extract metadata using the plugin's own extractor
-      const metadata = plugin.extractMetadata(tagName, attrs);
-      const allAttrs = this.extractAllAttributes(attrs);
-      newContext.artifact = {
-        type: metadata.type,
-        name: metadata.name,
-        xmlns: metadata.xmlns,
-        ...metadata.additionalInfo,
-        ...allAttrs,
-      };
-    } else {
-      // 2. GENERIC CONTEXT: For ALL other elements
-      //    Capture ALL attributes (not just a whitelist) — any attribute could be
-      //    semantically important in arbitrary XML (e.g., methods, uri-template, href)
-      const allAttrs = this.extractAllAttributes(attrs);
+    // Skip the root artifact tag — context.artifact was already set by buildRootContext.
+    // Re-adding it here would duplicate it as a dynamic context key.
+    if (tagName === parentContext.artifact?.type || localName === parentContext.artifact?.type) {
+      return newContext;
+    }
 
-      if (Object.keys(allAttrs).length > 0) {
-        // Has attributes → store as object (e.g., resource: { methods: 'POST', 'uri-template': '/deposit' })
-        newContext[localName] = allAttrs;
-      } else {
-        // No attributes (e.g., <then>, <else>, <onAccept>, <inSequence>)
-        // Always add as string context — every element in the traversal path is meaningful.
-        // updateContext is only called for element nodes, never for text/leaf content.
-        newContext[localName] = localName;
-      }
+    // Generic context: capture all attributes for any element encountered during traversal.
+    // Any attribute could be semantically important (e.g., methods, uri-template, xpath).
+    const allAttrs = this.extractAllAttributes(attrs);
+
+    if (Object.keys(allAttrs).length > 0) {
+      newContext[localName] = allAttrs;
+    } else {
+      // No attributes (e.g., <then>, <else>, <inSequence>) — store as a string marker
+      newContext[localName] = localName;
     }
 
     return newContext;
@@ -457,121 +279,52 @@ export class XMLChunker {
     range: LineRange,
     filePath: string,
     chunks: XMLChunk[],
-    parentChunkId: number | null,
     context: SemanticContext,
     precomputedEmbeddingText?: string
   ): void {
-    const resourceName = attrs.name || attrs['@_name'] || attrs.key || attrs['@_key'] ||
-      attrs.context || attrs['@_context'] || tagName;
     const chunkIndex = this.chunkCounter++;
 
-    const embeddingText = precomputedEmbeddingText ?? this.createEmbeddingText(tagName, resourceName, content, attrs, context);
-    const semanticType = this.mapToSemanticType(tagName);
-    const semanticIntent = this.inferIntent(tagName, attrs, content);
-    const contentHash = computeChunkHash(content, {
-      type: semanticType,
-      intent: semanticIntent,
-      context,
-    });
+    const embeddingText = precomputedEmbeddingText ?? this.createEmbeddingText(content, context);
 
-    // Extract references from this chunk's content
+    // Simplified content hash — hash the raw XML content only.
+    // Used by Pipeline for incremental embedding reuse.
+    const contentHash = createHash('sha256').update(content).digest('hex');
+
+    // Extract references from this chunk's content.
+    // NOTE: We do NOT mutate the shared `context` object here — that would
+    // pollute the context passed to any sibling nodes processed afterwards.
     const chunkReferences = this.extractReferencesFromContent(content);
 
-    // Detect if this is a standalone artifact definition
-    const standaloneTypes = ['sequence', 'localEntry', 'endpoint', 'template'];
-    const isStandalone = standaloneTypes.includes(tagName);
-    const sequenceKey = isStandalone ? (attrs.name || attrs['@_name'] || attrs.key || attrs['@_key']) : undefined;
-
-    // For custom artifacts, use the type inferred from context (folder-based)
-    // Otherwise, use registered resource types or fallback to path-based inference
-    const resourceType = context.artifact?.type ||
-      (this.isResourceType(tagName) ? tagName : this.getResourceType(filePath));
+    // A chunk is a standalone artifact definition when its tag IS the root artifact tag.
+    // This is true exactly when this chunk represents the top-level element of the file.
+    const isDefinition = tagName === context.artifact?.type;
+    const sequenceKey = isDefinition
+      ? (attrs.name || attrs['@_name'] || attrs.key || attrs['@_key'])
+      : undefined;
 
     chunks.push({
       filePath,
-      resourceName,
-      resourceType,
       chunkType: tagName,
       chunkIndex,
       startLine: range.start,
       endLine: range.end,
       content,
-      parentChunkId,
       embeddingText,
-      semanticType,
-      semanticIntent,
       contentHash,
       context: { ...context, references: chunkReferences.length > 0 ? chunkReferences : undefined },
       sequenceKey,
-      isSequenceDefinition: isStandalone,
+      isSequenceDefinition: isDefinition,
       referencedSequences: chunkReferences,
     });
-  }
-
-  /**
-   * Map XML tag to semantic type
-   * 
-   * STRATEGY: Registry lookup first, then structural heuristics, then fallback.
-   * No hardcoded tag-name-to-type mapping — works for arbitrary tags.
-   */
-  private mapToSemanticType(tagName: string): string {
-    const localName = tagName.split(':').pop() || tagName;
-
-    // 1. Registry: Check if it's a known root tag → use plugin id as type
-    const plugin = this.registry.getPluginForRootTag(tagName) || this.registry.getPluginForRootTag(localName);
-    if (plugin) return plugin.id;
-
-    // 2. Registry: Check if it's a known mediator
-    if (this.registry.isMediatorTag(tagName) || this.registry.isMediatorTag(localName)) return 'mediator';
-
-    // 3. Registry: Check if it's a known semantic boundary
-    if (this.registry.isSemanticBoundary(tagName) || this.registry.isSemanticBoundary(localName)) return 'boundary';
-
-    // 4. Structural heuristics (tag-name-agnostic)
-    if (tagName.includes('.')) return 'connector';           // http.post, google.sheets, etc.
-    if (tagName.includes(':') && /^[A-Z]/.test(localName)) return 'policy';  // wsp:Policy, etc.
-    if (/^[A-Z]/.test(localName)) return 'configuration';   // CamelCase → config element
-
-    // 5. Generic fallback
-    return 'component';
-  }
-
-  /**
-   * Infer semantic intent from tag, attributes, and content
-   * 
-   * STRATEGY: Registry-aware checks first, then attribute-based heuristics.
-   * Falls back to 'processing' for truly unknown elements.
-   */
-  private inferIntent(tagName: string, attrs: Record<string, string>, content: string): string {
-    const localName = tagName.split(':').pop() || tagName;
-
-    // 1. Registry: Check known mediator patterns
-    if (this.registry.isMediatorTag(tagName) || this.registry.isMediatorTag(localName)) {
-      // Sub-classify mediators by common patterns
-      if (tagName.startsWith('http.') || localName === 'call' || localName === 'send') return 'delegation';
-      if (localName === 'enrich' || localName === 'payloadFactory' || localName === 'xslt') return 'transformation';
-      if (localName === 'log') return 'logging';
-      if (localName === 'respond' || localName === 'drop') return 'response';
-      return 'mediation';  // Generic mediator intent
-    }
-
-    // 2. Attribute-based heuristics (fully tag-name-agnostic)
-    const attrKeys = Object.keys(attrs).map(k => k.replace(/^@_/, ''));
-    if (attrKeys.includes('expression') || attrKeys.includes('xpath')) return 'transformation';
-    if (attrKeys.includes('key') || attrKeys.includes('target')) return 'delegation';
-    if (attrKeys.includes('source') || attrKeys.includes('regex')) return 'validation';
-
-    // 3. Content-based heuristics
-    if (content.includes('fault') || content.includes('error') || content.includes('Fault')) return 'error-handling';
-    if (content.includes('SELECT') || content.includes('INSERT') || content.includes('sql')) return 'data-access';
-
-    return 'processing';
   }
 
   /**
    * Count tokens using the model's tokenizer.
    * Receives the already-built embeddingText so the gate operates on the
    * exact same text that will be sent to the embedding model.
+   *
+   * Falls back to character approximation (~4 chars per token) when no
+   * embedder is available (e.g., in tests).
    */
   private countTokens(text: string): number {
     if (this.embedder && this.embedder.countTokens) {
@@ -595,7 +348,7 @@ export class XMLChunker {
       parts.push(`${this.formatContextKey(type)}: ${name}`);
       // Include additional artifact attrs (context, transports, etc.)
       const extraPairs = Object.entries(rest)
-        .filter(([k, v]) => v !== undefined && v !== null && v !== '' && k !== 'isCustom' && k !== 'rootTag' && k !== 'inferredFromPath')
+        .filter(([k, v]) => v !== undefined && v !== null && v !== '')
         .map(([k, v]) => `${k}=${v}`)
         .join(' ');
       if (extraPairs) parts.push(extraPairs);
@@ -641,8 +394,7 @@ export class XMLChunker {
   }
 
   /**
-   * Find the line range for an XML element
-   * Automatically includes structural wrapper elements (onAccept, onReject, then, else, etc.)
+   * Find the line range for an XML element.
    */
   private findElementRange(tagName: string, lines: string[]): LineRange {
     let startLine = -1;
@@ -687,114 +439,26 @@ export class XMLChunker {
     if (startLine === -1) startLine = 1;
     if (endLine === -1) endLine = startLine;
 
-    // GENERALIZABLE WRAPPER DETECTION:
-    // Expand range to include structural wrapper elements (onAccept, onReject, then, else, etc.)
-    // These are parent elements that have minimal/no attributes and provide structural context
-    const expandedRange = this.expandRangeForStructuralWrappers(startLine, endLine, lines);
-
-    return expandedRange;
-  }
-
-  /**
-   * Expand a range to include structural wrapper elements
-   * Detects wrappers generically without hardcoding tag names
-   */
-  private expandRangeForStructuralWrappers(startLine: number, endLine: number, lines: string[]): LineRange {
-    let newStart = startLine;
-    let newEnd = endLine;
-
-    // Look backwards for structural wrapper opening tags
-    // A structural wrapper is typically:
-    // - A simple opening tag with no or minimal attributes
-    // - Located immediately before our element (with possible whitespace)
-    if (startLine > 1) {
-      for (let i = startLine - 2; i >= 0 && i >= startLine - 5; i--) {
-        const line = lines[i].trim();
-
-        // Check if this line is a simple opening tag (e.g., <onAccept>, <then>, <else>)
-        // Pattern: <tagname> or <tagname >, but NOT tags with attributes like <tag attr="value">
-        const simpleOpeningTag = /^<(\w+:?\w*)>\s*$/;
-        const match = line.match(simpleOpeningTag);
-
-        if (match) {
-          // Found a structural wrapper, expand to include it
-          newStart = i + 1;
-          // Continue looking for more nested wrappers
-        } else if (line && !line.startsWith('<!--') && line !== '') {
-          // Hit a non-wrapper line, stop searching
-          break;
-        }
-      }
-    }
-
-    // Look forwards for corresponding closing tags
-    // Match each wrapper we found when expanding backwards
-    if (newStart < startLine && endLine < lines.length) {
-      const wrappersToClose = startLine - newStart;
-      let closedWrappers = 0;
-
-      for (let i = endLine; i < lines.length && i < endLine + 10; i++) {
-        const line = lines[i].trim();
-
-        // Check if this is a simple closing tag
-        const simpleClosingTag = /^<\/(\w+:?\w*)>\s*$/;
-        if (simpleClosingTag.test(line)) {
-          closedWrappers++;
-          newEnd = i + 1;
-
-          if (closedWrappers >= wrappersToClose) {
-            break;
-          }
-        } else if (line && !line.startsWith('<!--') && line !== '') {
-          // Hit a non-wrapper line before closing all wrappers
-          break;
-        }
-      }
-    }
-
-    return { start: newStart, end: newEnd };
+    return { start: startLine, end: endLine };
   }
 
   private extractContent(lines: string[], range: LineRange): string {
     return lines.slice(range.start - 1, range.end).join('\n');
   }
 
-  private getResourceType(filePath: string): string {
-    if (filePath.includes('/apis/')) return 'api';
-    if (filePath.includes('/sequences/')) return 'sequence';
-    if (filePath.includes('/proxy-services/')) return 'proxy';
-    if (filePath.includes('/endpoints/')) return 'endpoint';
-    if (filePath.includes('/local-entries/')) return 'localEntry';
-    if (filePath.includes('/templates/')) return 'template';
-    if (filePath.includes('/data-services/')) return 'dataService';
-    if (filePath.includes('/data-sources/')) return 'dataSource';
-    if (filePath.includes('/tasks/')) return 'task';
-    if (filePath.includes('/message-stores/')) return 'messageStore';
-    if (filePath.includes('/message-processors/')) return 'messageProcessor';
-    if (filePath.includes('/inbound-endpoints/')) return 'inboundEndpoint';
-    return 'unknown';
-  }
-
-
   /**
-   * Create natural text representation for embedding
-   * Format: [JSON Context] + [Cleaned XML Content]
-   * 
+   * Create natural text representation for embedding.
+   * Format: [Formatted Context Metadata] + [Cleaned XML Content tokens]
+   *
    * Example:
-   *   Context: {"api":{"name":"BankAPI","context":"/bankapi"},"resource":{"method":"GET","uriTemplate":"/"}}
-   *   Content: <payloadFactory><format>{"greeting":"Hello"}</format></payloadFactory>
-   *   → {"api":{"name":"BankAPI","context":"/bankapi"},"resource":{"method":"GET"}} payloadFactory format greeting Hello
+   *   context → "Api: BankAPI context=/bankapi Resource: method=GET uriTemplate=/"
+   *   content → <payloadFactory><format>{"greeting":"Hello"}</format></payloadFactory>
+   *   → "Api: BankAPI context=/bankapi Resource: method=GET payloadFactory format greeting Hello"
    */
   private createEmbeddingText(
-    tagName: string,
-    resourceName: string,
     content: string,
-    attrs: Record<string, string>,
     context: SemanticContext
   ): string {
-
-    //  // Start with JSON context for structured representation
-    //   const contextStr = JSON.stringify(context);
 
     // Start with formatted context metadata as text
     const contextStr = this.formatMetadata(context);

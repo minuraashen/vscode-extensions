@@ -2,25 +2,20 @@ import Database from 'better-sqlite3';
 import * as fs from 'fs';
 import * as path from 'path';
 
-// Schema is inlined to avoid runtime dependency on schema.sql being present
-// alongside the compiled JS (tsc watch / dev mode does not copy non-TS assets).
+// Schema is inlined so the compiled JS bundle is self-contained
+// (tsc watch / dev mode does not copy non-TS assets).
 const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS chunks (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   file_path TEXT NOT NULL,
   file_hash TEXT NOT NULL,
-  resource_name TEXT NOT NULL,
-  resource_type TEXT NOT NULL,
   chunk_type TEXT NOT NULL,
   chunk_index INTEGER NOT NULL,
   start_line INTEGER NOT NULL,
   end_line INTEGER NOT NULL,
   embedding BLOB NOT NULL,
-  parent_chunk_id INTEGER,
   timestamp INTEGER NOT NULL,
   content_hash TEXT NOT NULL,
-  semantic_type TEXT NOT NULL,
-  semantic_intent TEXT NOT NULL,
   context_json TEXT NOT NULL,
   sequence_key TEXT,
   is_sequence_definition INTEGER DEFAULT 0,
@@ -29,9 +24,7 @@ CREATE TABLE IF NOT EXISTS chunks (
 
 CREATE INDEX IF NOT EXISTS idx_file_path ON chunks(file_path);
 CREATE INDEX IF NOT EXISTS idx_file_hash ON chunks(file_hash);
-CREATE INDEX IF NOT EXISTS idx_resource_type ON chunks(resource_type);
 CREATE INDEX IF NOT EXISTS idx_content_hash ON chunks(content_hash);
-CREATE INDEX IF NOT EXISTS idx_semantic_type ON chunks(semantic_type);
 CREATE INDEX IF NOT EXISTS idx_sequence_key ON chunks(sequence_key);
 CREATE INDEX IF NOT EXISTS idx_is_sequence_definition ON chunks(is_sequence_definition);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_unique_chunk ON chunks(file_path, chunk_index, start_line, end_line);
@@ -59,82 +52,14 @@ CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
 export interface ChunkMetadata {
   filePath: string;
   fileHash: string;
-  resourceName: string;
-  resourceType: string;
   chunkType: string;
   chunkIndex: number;
   startLine: number;
   endLine: number;
-  parentChunkId: number | null;
   timestamp: number;
-  // NEW: Merkle tree and semantic metadata
   contentHash: string;
-  semanticType: string;
-  semanticIntent: string;
-  context: {
-    api?: {
-      name?: string;
-      context?: string;
-      xmlns?: string;
-    };
-    resource?: {
-      method?: string;
-      uriTemplate?: string;
-    };
-    sequence?: string | {
-      name?: string;
-      xmlns?: string;
-    };
-    localEntry?: {
-      key?: string;
-      xmlns?: string;
-    };
-    endpoint?: {
-      name?: string;
-      xmlns?: string;
-    };
-    template?: {
-      name?: string;
-      xmlns?: string;
-    };
-    // NEW: Support for additional artifact types
-    proxyService?: {
-      name?: string;
-      transports?: string;
-      xmlns?: string;
-    };
-    messageStore?: {
-      name?: string;
-      type?: string;
-      xmlns?: string;
-    };
-    messageProcessor?: {
-      name?: string;
-      type?: string;
-      messageStore?: string;
-      xmlns?: string;
-    };
-    dataService?: {
-      name?: string;
-      enableBatchRequests?: boolean;
-      xmlns?: string;
-    };
-    query?: {
-      id?: string;
-      useConfig?: string;
-    };
-    operation?: {
-      name?: string;
-      callsQuery?: string;
-    };
-    task?: {
-      name?: string;
-      trigger?: string;
-      xmlns?: string;
-    };
-    references?: string[];
-  };
-  // NEW: Cross-file sequence tracking
+  context: Record<string, any>;
+  // Cross-file artifact tracking
   sequenceKey?: string;
   isSequenceDefinition?: boolean;
   referencedSequences?: string[];
@@ -147,6 +72,22 @@ export interface ChunkRecord extends ChunkMetadata {
 
 export class SQLiteDB {
   private db: Database.Database;
+
+  // ── Cached prepared statements (lazy-initialized) ──────────────────
+  private _stmtInsertChunk: Database.Statement | null = null;
+  private _stmtUpdateChunk: Database.Statement | null = null;
+  private _stmtGetChunksByFile: Database.Statement | null = null;
+  private _stmtGetSeqDef: Database.Statement | null = null;
+  private _stmtLinkSeqRef: Database.Statement | null = null;
+  private _stmtDeleteChunksByFile: Database.Statement | null = null;
+  private _stmtDeleteChunk: Database.Statement | null = null;
+  private _stmtGetAllChunks: Database.Statement | null = null;
+  private _stmtGetFileHashes: Database.Statement | null = null;
+  private _stmtGetChunkCount: Database.Statement | null = null;
+  private _stmtInsertFts: Database.Statement | null = null;
+  private _stmtDeleteFts: Database.Statement | null = null;
+  private _stmtGetIdsByFile: Database.Statement | null = null;
+  private _stmtGetAllEmbeddings: Database.Statement | null = null;
 
   constructor(dbPath: string) {
     const dir = path.dirname(dbPath);
@@ -165,10 +106,12 @@ export class SQLiteDB {
   // ── FTS5 helpers (keep in sync with chunks table) ──────────────────
 
   private insertFts(chunkId: number, embeddingText: string): void {
-    const stmt = this.db.prepare(
-      `INSERT INTO chunks_fts (chunk_id, embedding_text) VALUES (?, ?)`
-    );
-    stmt.run(chunkId, embeddingText);
+    if (!this._stmtInsertFts) {
+      this._stmtInsertFts = this.db.prepare(
+        `INSERT INTO chunks_fts (chunk_id, embedding_text) VALUES (?, ?)`
+      );
+    }
+    this._stmtInsertFts.run(chunkId, embeddingText);
   }
 
   private updateFts(chunkId: number, embeddingText: string): void {
@@ -178,39 +121,38 @@ export class SQLiteDB {
   }
 
   private deleteFts(chunkId: number): void {
-    const stmt = this.db.prepare(
-      `DELETE FROM chunks_fts WHERE chunk_id = ?`
-    );
-    stmt.run(chunkId);
+    if (!this._stmtDeleteFts) {
+      this._stmtDeleteFts = this.db.prepare(
+        `DELETE FROM chunks_fts WHERE chunk_id = ?`
+      );
+    }
+    this._stmtDeleteFts.run(chunkId);
   }
 
   // ── Chunk CRUD ────────────────────────────────────────────────────
 
   insertChunk(metadata: ChunkMetadata, embedding: Float32Array, embeddingText?: string): number {
-    const stmt = this.db.prepare(`
-      INSERT INTO chunks (
-        file_path, file_hash, resource_name, resource_type, chunk_type,
-        chunk_index, start_line, end_line, parent_chunk_id, embedding, timestamp,
-        content_hash, semantic_type, semantic_intent, context_json,
-        sequence_key, is_sequence_definition, referenced_sequences
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `);
+    if (!this._stmtInsertChunk) {
+      this._stmtInsertChunk = this.db.prepare(`
+        INSERT INTO chunks (
+          file_path, file_hash, chunk_type,
+          chunk_index, start_line, end_line, embedding, timestamp,
+          content_hash, context_json,
+          sequence_key, is_sequence_definition, referenced_sequences
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+    }
 
-    const result = stmt.run(
+    const result = this._stmtInsertChunk.run(
       metadata.filePath,
       metadata.fileHash,
-      metadata.resourceName,
-      metadata.resourceType,
       metadata.chunkType,
       metadata.chunkIndex,
       metadata.startLine,
       metadata.endLine,
-      metadata.parentChunkId,
       Buffer.from(embedding.buffer),
       metadata.timestamp,
       metadata.contentHash,
-      metadata.semanticType,
-      metadata.semanticIntent,
       JSON.stringify(metadata.context),
       metadata.sequenceKey || null,
       metadata.isSequenceDefinition ? 1 : 0,
@@ -228,30 +170,27 @@ export class SQLiteDB {
   }
 
   updateChunk(id: number, metadata: ChunkMetadata, embedding: Float32Array, embeddingText?: string): void {
-    const stmt = this.db.prepare(`
-      UPDATE chunks SET
-        file_hash = ?, resource_name = ?, resource_type = ?, chunk_type = ?,
-        chunk_index = ?, start_line = ?, end_line = ?, parent_chunk_id = ?,
-        embedding = ?, timestamp = ?,
-        content_hash = ?, semantic_type = ?, semantic_intent = ?, context_json = ?,
-        sequence_key = ?, is_sequence_definition = ?, referenced_sequences = ?
-      WHERE id = ?
-    `);
+    if (!this._stmtUpdateChunk) {
+      this._stmtUpdateChunk = this.db.prepare(`
+        UPDATE chunks SET
+          file_hash = ?, chunk_type = ?,
+          chunk_index = ?, start_line = ?, end_line = ?,
+          embedding = ?, timestamp = ?,
+          content_hash = ?, context_json = ?,
+          sequence_key = ?, is_sequence_definition = ?, referenced_sequences = ?
+        WHERE id = ?
+      `);
+    }
 
-    stmt.run(
+    this._stmtUpdateChunk.run(
       metadata.fileHash,
-      metadata.resourceName,
-      metadata.resourceType,
       metadata.chunkType,
       metadata.chunkIndex,
       metadata.startLine,
       metadata.endLine,
-      metadata.parentChunkId,
       Buffer.from(embedding.buffer),
       metadata.timestamp,
       metadata.contentHash,
-      metadata.semanticType,
-      metadata.semanticIntent,
       JSON.stringify(metadata.context),
       metadata.sequenceKey || null,
       metadata.isSequenceDefinition ? 1 : 0,
@@ -266,10 +205,12 @@ export class SQLiteDB {
   }
 
   getChunksByFile(filePath: string): ChunkRecord[] {
-    const stmt = this.db.prepare(`
-      SELECT * FROM chunks WHERE file_path = ?
-    `);
-    const rows = stmt.all(filePath) as any[];
+    if (!this._stmtGetChunksByFile) {
+      this._stmtGetChunksByFile = this.db.prepare(
+        `SELECT * FROM chunks WHERE file_path = ?`
+      );
+    }
+    const rows = this._stmtGetChunksByFile.all(filePath) as any[];
     return rows.map(this.mapRowToRecord);
   }
 
@@ -290,12 +231,14 @@ export class SQLiteDB {
       [artifactType, artifactName] = artifactRef.split(':', 2);
     }
 
-    const stmt = this.db.prepare(`
-      SELECT * FROM chunks 
-      WHERE sequence_key = ? AND is_sequence_definition = 1 
-      LIMIT 1
-    `);
-    const row = stmt.get(artifactName) as any;
+    if (!this._stmtGetSeqDef) {
+      this._stmtGetSeqDef = this.db.prepare(`
+        SELECT * FROM chunks 
+        WHERE sequence_key = ? AND is_sequence_definition = 1 
+        LIMIT 1
+      `);
+    }
+    const row = this._stmtGetSeqDef.get(artifactName) as any;
     return row ? this.mapRowToRecord(row) : null;
   }
 
@@ -303,34 +246,42 @@ export class SQLiteDB {
    * Link caller chunk to callee sequence definition
    */
   linkSequenceReference(callerChunkId: number, calleeChunkId: number, sequenceKey: string): void {
-    const stmt = this.db.prepare(`
-      INSERT INTO sequence_references (caller_chunk_id, callee_chunk_id, sequence_key, timestamp)
-      VALUES (?, ?, ?, ?)
-    `);
-    stmt.run(callerChunkId, calleeChunkId, sequenceKey, Date.now());
+    if (!this._stmtLinkSeqRef) {
+      this._stmtLinkSeqRef = this.db.prepare(`
+        INSERT INTO sequence_references (caller_chunk_id, callee_chunk_id, sequence_key, timestamp)
+        VALUES (?, ?, ?, ?)
+      `);
+    }
+    this._stmtLinkSeqRef.run(callerChunkId, calleeChunkId, sequenceKey, Date.now());
   }
 
   deleteChunksByFile(filePath: string): void {
-    // Delete FTS5 entries for all chunks in this file first
-    const idsStmt = this.db.prepare(`SELECT id FROM chunks WHERE file_path = ?`);
-    const rows = idsStmt.all(filePath) as { id: number }[];
-    for (const row of rows) {
-      this.deleteFts(row.id);
-    }
+    // Delete FTS5 entries for all chunks in this file using a subquery (single statement)
+    this.db.prepare(
+      `DELETE FROM chunks_fts WHERE chunk_id IN (SELECT id FROM chunks WHERE file_path = ?)`
+    ).run(filePath);
 
-    const stmt = this.db.prepare(`DELETE FROM chunks WHERE file_path = ?`);
-    stmt.run(filePath);
+    if (!this._stmtDeleteChunksByFile) {
+      this._stmtDeleteChunksByFile = this.db.prepare(
+        `DELETE FROM chunks WHERE file_path = ?`
+      );
+    }
+    this._stmtDeleteChunksByFile.run(filePath);
   }
 
   deleteChunk(id: number): void {
     this.deleteFts(id);
-    const stmt = this.db.prepare(`DELETE FROM chunks WHERE id = ?`);
-    stmt.run(id);
+    if (!this._stmtDeleteChunk) {
+      this._stmtDeleteChunk = this.db.prepare(`DELETE FROM chunks WHERE id = ?`);
+    }
+    this._stmtDeleteChunk.run(id);
   }
 
   getAllChunks(): ChunkRecord[] {
-    const stmt = this.db.prepare(`SELECT * FROM chunks`);
-    const rows = stmt.all() as any[];
+    if (!this._stmtGetAllChunks) {
+      this._stmtGetAllChunks = this.db.prepare(`SELECT * FROM chunks`);
+    }
+    const rows = this._stmtGetAllChunks.all() as any[];
     return rows.map(this.mapRowToRecord);
   }
 
@@ -339,18 +290,13 @@ export class SQLiteDB {
       id: row.id,
       filePath: row.file_path,
       fileHash: row.file_hash,
-      resourceName: row.resource_name,
-      resourceType: row.resource_type,
       chunkType: row.chunk_type,
       chunkIndex: row.chunk_index,
       startLine: row.start_line,
       endLine: row.end_line,
-      parentChunkId: row.parent_chunk_id,
       timestamp: row.timestamp,
       embedding: row.embedding,
       contentHash: row.content_hash,
-      semanticType: row.semantic_type,
-      semanticIntent: row.semantic_intent,
       context: JSON.parse(row.context_json),
       sequenceKey: row.sequence_key,
       isSequenceDefinition: row.is_sequence_definition === 1,
@@ -363,8 +309,10 @@ export class SQLiteDB {
    * Used to seed the Watcher on startup so unchanged files are not re-processed.
    */
   getLatestFileHashes(): Map<string, string> {
-    const stmt = this.db.prepare(`SELECT DISTINCT file_path, file_hash FROM chunks`);
-    const rows = stmt.all() as Array<{ file_path: string; file_hash: string }>;
+    if (!this._stmtGetFileHashes) {
+      this._stmtGetFileHashes = this.db.prepare(`SELECT DISTINCT file_path, file_hash FROM chunks`);
+    }
+    const rows = this._stmtGetFileHashes.all() as Array<{ file_path: string; file_hash: string }>;
     const map = new Map<string, string>();
     for (const row of rows) {
       map.set(row.file_path, row.file_hash);
@@ -378,9 +326,43 @@ export class SQLiteDB {
    * loading all rows into memory.
    */
   getChunkCount(): number {
-    const stmt = this.db.prepare(`SELECT COUNT(*) AS cnt FROM chunks`);
-    const row = stmt.get() as { cnt: number };
+    if (!this._stmtGetChunkCount) {
+      this._stmtGetChunkCount = this.db.prepare(`SELECT COUNT(*) AS cnt FROM chunks`);
+    }
+    const row = this._stmtGetChunkCount.get() as { cnt: number };
     return row.cnt;
+  }
+
+  /**
+   * Lightweight query for semantic search: returns only the fields needed for
+   * scoring and ranking (id, embedding, filePath, chunkType, startLine, endLine, context).
+   * Avoids deserializing full metadata (fileHash, contentHash, timestamps, etc.)
+   * that is not needed at query time.
+   */
+  getAllChunkEmbeddings(): Array<{
+    id: number;
+    embedding: Buffer;
+    filePath: string;
+    chunkType: string;
+    startLine: number;
+    endLine: number;
+    context: Record<string, any>;
+  }> {
+    if (!this._stmtGetAllEmbeddings) {
+      this._stmtGetAllEmbeddings = this.db.prepare(
+        `SELECT id, embedding, file_path, chunk_type, start_line, end_line, context_json FROM chunks`
+      );
+    }
+    const rows = this._stmtGetAllEmbeddings.all() as any[];
+    return rows.map(row => ({
+      id: row.id,
+      embedding: row.embedding,
+      filePath: row.file_path,
+      chunkType: row.chunk_type,
+      startLine: row.start_line,
+      endLine: row.end_line,
+      context: JSON.parse(row.context_json),
+    }));
   }
 
   /**

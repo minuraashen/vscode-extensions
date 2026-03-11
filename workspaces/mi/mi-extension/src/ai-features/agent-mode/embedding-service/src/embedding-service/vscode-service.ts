@@ -22,7 +22,6 @@ import * as vscode from 'vscode';
 import { SQLiteDB } from '../db/sqlite';
 import { Embedder } from './embedder';
 import { Pipeline } from './pipeline';
-import { artifactRegistry } from './artifact-registry';
 import { createEmbeddingFileWatcher } from './vscode-watcher';
 import { getCopilotProjectStorageDir } from '../../../storage-paths';
 import { getWso2MiModelsDir, isModelDownloaded, downloadModel } from './model-manager';
@@ -271,7 +270,7 @@ export class VSCodeEmbeddingService {
             await this.embedder.initialize(this.config.modelPath);
 
             // Create pipeline
-            this.pipeline = new Pipeline(this.db, this.embedder, artifactRegistry);
+            this.pipeline = new Pipeline(this.db, this.embedder);
 
             // Run initial indexing with detailed staged progress notification
             const dirs = this.getArtifactDirs();

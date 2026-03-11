@@ -133,6 +133,19 @@ interface ScoredChunk {
 function bm25Search(db: SQLiteDB, query: string, limit: number): Map<number, number> {
     const scores = new Map<number, number>();
     try {
+        // Sanitize query for FTS5: strip characters that have special meaning
+        // in FTS5 syntax (AND, OR, NOT, NEAR, quotes, parens, etc.) to prevent
+        // query parse errors from arbitrary user input.
+        const sanitized = query
+            .replace(/["'(){}*:^~]/g, ' ')           // Remove FTS5 special chars
+            .replace(/\b(AND|OR|NOT|NEAR)\b/gi, '')  // Remove FTS5 operators
+            .replace(/\s+/g, ' ')
+            .trim();
+
+        if (!sanitized) {
+            return scores;
+        }
+
         const handle = db.getHandle();
         const stmt = handle.prepare(`
             SELECT chunk_id, rank
@@ -141,7 +154,7 @@ function bm25Search(db: SQLiteDB, query: string, limit: number): Map<number, num
             ORDER BY rank
             LIMIT ?
         `);
-        const rows = stmt.all(query, limit * 3) as Array<{ chunk_id: number; rank: number }>;
+        const rows = stmt.all(sanitized, limit * 3) as Array<{ chunk_id: number; rank: number }>;
 
         if (rows.length === 0) {
             return scores;
@@ -178,7 +191,15 @@ function mmrRerank(
         return candidates;
     }
 
+    // Pre-compute Float32Array embeddings to avoid repeated Buffer→Float32Array
+    // conversions inside the O(k × n) inner loop.
+    const embeddingCache = new Map<number, Float32Array>();
+    for (let i = 0; i < candidates.length; i++) {
+        embeddingCache.set(i, new Float32Array(candidates[i].chunk.embedding.buffer));
+    }
+
     const selected: ScoredChunk[] = [];
+    const selectedIndices: number[] = [];
     const remaining = new Set(candidates.map((_, i) => i));
 
     for (let step = 0; step < k && remaining.size > 0; step++) {
@@ -186,14 +207,13 @@ function mmrRerank(
         let bestMmrScore = -Infinity;
 
         for (const idx of remaining) {
-            const candidate = candidates[idx];
-            const relevance = candidate.hybridScore;
+            const relevance = candidates[idx].hybridScore;
+            const candEmb = embeddingCache.get(idx)!;
 
             // Max similarity to already-selected chunks
             let maxSim = 0;
-            for (const sel of selected) {
-                const selEmb = new Float32Array(sel.chunk.embedding.buffer);
-                const candEmb = new Float32Array(candidate.chunk.embedding.buffer);
+            for (const selIdx of selectedIndices) {
+                const selEmb = embeddingCache.get(selIdx)!;
                 const sim = cosineSimilarity(selEmb, candEmb);
                 if (sim > maxSim) {
                     maxSim = sim;
@@ -209,6 +229,7 @@ function mmrRerank(
 
         if (bestIdx >= 0) {
             selected.push(candidates[bestIdx]);
+            selectedIndices.push(bestIdx);
             remaining.delete(bestIdx);
         }
     }
@@ -275,7 +296,9 @@ function buildXmlHierarchy(chunk: ChunkRecord): string[] {
         hierarchy.push(`sequence:${seqName}`);
     }
 
-    hierarchy.push(`${chunk.chunkType}:${chunk.resourceName}`);
+    const localCtx = ctx[chunk.chunkType];
+    const localName = typeof localCtx === 'string' ? '' : (localCtx?.name || localCtx?.key || localCtx?.['@_name'] || localCtx?.['@_key'] || '');
+    hierarchy.push(localName ? `${chunk.chunkType}:${localName}` : chunk.chunkType);
 
     return hierarchy;
 }
@@ -354,10 +377,10 @@ export function createSemanticSearchExecute(projectPath: string): SemanticSearch
             // 1. Embed the query
             const queryEmbedding = await embedder.embed(query);
 
-            // 2. Get all chunks and compute semantic similarity
-            const allChunks = db.getAllChunks();
+            // 2. Get chunk embeddings for similarity scoring (lightweight query)
+            const allChunkEmbeddings = db.getAllChunkEmbeddings();
 
-            if (allChunks.length === 0) {
+            if (allChunkEmbeddings.length === 0) {
                 return {
                     success: true,
                     message:
@@ -374,13 +397,19 @@ export function createSemanticSearchExecute(projectPath: string): SemanticSearch
             const effectiveK = adaptiveTopK(query, topK);
             const threshold = score_threshold ?? DEFAULT_SCORE_THRESHOLD;
 
-            let scored: ScoredChunk[] = allChunks.map(chunk => {
+            let scored: ScoredChunk[] = allChunkEmbeddings.map(chunk => {
                 const chunkEmb = new Float32Array(chunk.embedding.buffer);
                 const semScore = cosineSimilarity(queryEmbedding, chunkEmb);
                 const bm25 = bm25Scores.get(chunk.id) ?? 0;
                 const hybrid = SEMANTIC_WEIGHT * semScore + BM25_WEIGHT * bm25;
 
-                return { chunk, semanticScore: semScore, bm25Score: bm25, hybridScore: hybrid };
+                // Build a minimal ChunkRecord-compatible object for downstream use
+                return {
+                    chunk: chunk as any as ChunkRecord,
+                    semanticScore: semScore,
+                    bm25Score: bm25,
+                    hybridScore: hybrid,
+                };
             });
 
             // 5. Filter by score threshold
@@ -388,7 +417,7 @@ export function createSemanticSearchExecute(projectPath: string): SemanticSearch
 
             // 6. Filter by semantic type if specified
             if (semantic_type) {
-                scored = scored.filter(s => s.chunk.semanticType === semantic_type);
+                scored = scored.filter(s => s.chunk.chunkType === semantic_type || s.chunk.context.artifact?.type === semantic_type);
             }
 
             // 7. Sort by hybrid score descending
@@ -429,7 +458,7 @@ export function createSemanticSearchExecute(projectPath: string): SemanticSearch
                     success: true,
                     message:
                         `No results above threshold ${threshold} for query "${query}". ` +
-                        `(${latencyMs}ms, ${allChunks.length} chunks searched). ` +
+                        `(${latencyMs}ms, ${allChunkEmbeddings.length} chunks searched). ` +
                         'FALLBACK REQUIRED: Use grep with relevant keywords and file_read to find matching code. ' +
                         'Try extracting key terms from your original query for the grep search.',
                 };

@@ -11,7 +11,8 @@ describe('XMLChunker', () => {
   let tmpDir: string;
 
   before(() => {
-    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'chunker-test-'));
+    const tmpBase = path.join(__dirname, 'tmp-chunker-test-');
+    tmpDir = fs.mkdtempSync(tmpBase);
   });
 
   after(() => {
@@ -156,7 +157,7 @@ describe('XMLChunker', () => {
       // proves that findElementRange identified the http.post boundaries via
       // the escaped regex (dot escaped, so only '<http.post' is matched).
       const filePath = writeTmpFile('connector-descent.xml', CONNECTOR_XML);
-      const chunks = await new XMLChunker(undefined, undefined, 3).chunkFile(filePath);
+      const chunks = await new XMLChunker(undefined, 3).chunkFile(filePath);
       const urlChunk = chunks.find(c => c.chunkType === 'url');
       const methodChunk = chunks.find(c => c.chunkType === 'method');
       assert.ok(urlChunk, `Expected url chunk. Types: [${chunks.map(c => c.chunkType).join(', ')}]`);
@@ -166,7 +167,7 @@ describe('XMLChunker', () => {
     it('url chunk content is the exact url element (correct line range)', async () => {
       // Verifies findElementRange returned the right lines for a connector child.
       const filePath = writeTmpFile('connector-url-range.xml', CONNECTOR_XML);
-      const chunks = await new XMLChunker(undefined, undefined, 3).chunkFile(filePath);
+      const chunks = await new XMLChunker(undefined, 3).chunkFile(filePath);
       const urlChunk = chunks.find(c => c.chunkType === 'url');
       assert.ok(urlChunk, `url chunk not found. Types: [${chunks.map(c => c.chunkType).join(', ')}]`);
       assert.ok(urlChunk!.startLine > 0, 'startLine must be positive');
@@ -389,7 +390,7 @@ describe('XMLChunker', () => {
   // counts unique tag names — a filter with <then> and <else> has 2 distinct
   // child tags and should still be classified as structurally complex.
 
-  describe('Filter mediator — hasComplexStructure fix', () => {
+  describe('Filter mediator — chunking with pure tree traversal', () => {
     it('filter with then/else children is detected and chunked', async () => {
       const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <sequence name="FilterSeq" xmlns="http://ws.apache.org/ns/synapse">
@@ -404,7 +405,7 @@ describe('XMLChunker', () => {
 </sequence>`;
       // maxTokens=3 forces descent into filter children
       const filePath = writeTmpFile('filter.xml', xml);
-      const chunks = await new XMLChunker(undefined, undefined, 3).chunkFile(filePath);
+      const chunks = await new XMLChunker(undefined, 3).chunkFile(filePath);
       assert.ok(chunks.length > 0, 'Should produce chunks');
       const types = chunks.map(c => c.chunkType);
       assert.ok(
@@ -413,14 +414,7 @@ describe('XMLChunker', () => {
       );
     });
 
-    it('element with two identical child tags is NOT classified as complex (distinct-tag fix)', () => {
-      // Before the fix: Object.keys(array) returns ['0','1'] → length=2 → complex=true
-      // After the fix:  two <log> children → Set size = 1 → complex=false
-      // We test this indirectly via the chunker: a synthetic element with two identical
-      // children should NOT trigger the complexity heuristic (it has no attributes either,
-      // so isSemanticBoundary should return false for it).
-      // We confirm by checking the chunker produces the sequence-level chunk, not a
-      // spurious chunk for the wrapper element itself.
+    it('element with two identical child tags still produces valid chunks', () => {
       const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <sequence name="DupChildSeq" xmlns="http://ws.apache.org/ns/synapse">
     <log level="simple"/>

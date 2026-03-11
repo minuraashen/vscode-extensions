@@ -2,7 +2,6 @@ import { Watcher, FileChange } from './watcher';
 import { XMLChunker } from './chunker';
 import { Embedder } from './embedder';
 import { SQLiteDB, ChunkMetadata } from '../db/sqlite';
-import { ArtifactRegistry, artifactRegistry } from './artifact-registry';
 
 /**
  * Progress callback for reporting embedding pipeline status.
@@ -19,14 +18,12 @@ export type PipelineProgressCallback = (
 ) => void;
 
 /**
- * Pipeline with Incremental Embedding and Plugin Support
+ * Pipeline with Incremental Embedding
  * 
  * Key features:
- * - Build Merkle tree from new chunks
  * - Compare with existing chunks by content hash
  * - Only re-embed chunks with changed content hashes
  * - Reuse embeddings from unchanged chunks
- * - Uses ArtifactRegistry for extensible artifact detection
  */
 
 export class Pipeline {
@@ -34,12 +31,10 @@ export class Pipeline {
   private chunker: XMLChunker;
   private embedder: Embedder;
   private db: SQLiteDB;
-  private registry: ArtifactRegistry;
 
-  constructor(db: SQLiteDB, embedder: Embedder, registry?: ArtifactRegistry) {
+  constructor(db: SQLiteDB, embedder: Embedder) {
     this.watcher = new Watcher();
-    this.registry = registry || artifactRegistry;
-    this.chunker = new XMLChunker(embedder, this.registry);
+    this.chunker = new XMLChunker(embedder);
     this.embedder = embedder;
     this.db = db;
   }
@@ -129,25 +124,15 @@ export class Pipeline {
     let embeddedCount = 0;
 
     for (const chunk of chunks) {
-      let parentDbId: number | null = null;
-      if (chunk.parentChunkId !== null && chunkIndexToDbId.has(chunk.parentChunkId)) {
-        parentDbId = chunkIndexToDbId.get(chunk.parentChunkId)!;
-      }
-
       const metadata: ChunkMetadata = {
         filePath: chunk.filePath,
         fileHash,
-        resourceName: chunk.resourceName,
-        resourceType: chunk.resourceType,
         chunkType: chunk.chunkType,
         chunkIndex: chunk.chunkIndex,
         startLine: chunk.startLine,
         endLine: chunk.endLine,
-        parentChunkId: parentDbId,
         timestamp: Date.now(),
         contentHash: chunk.contentHash,
-        semanticType: chunk.semanticType,
-        semanticIntent: chunk.semanticIntent,
         context: chunk.context,
         sequenceKey: chunk.sequenceKey,
         isSequenceDefinition: chunk.isSequenceDefinition,
