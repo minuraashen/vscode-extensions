@@ -25,5 +25,9 @@ test-results/**
 .env
 .env.example
 scripts/**
+native-runtime-artifacts/**
+dist/node_modules/better-sqlite3/**
+dist/node_modules/onnxruntime-node/**
+dist/node_modules/onnxruntime-common/**
 *.log
 rush-logs

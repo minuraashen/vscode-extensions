@@ -68,6 +68,10 @@ export type {
     // Memory management types
     ClearAgentMemoryResponse,
     OpenAgentMemoryFolderResponse,
+    // Semantic search types
+    SemanticSearchData,
+    SemanticSearchChunk,
+    SemanticSearchConfidence,
 } from './types';
 
 // Export RPC type definitions

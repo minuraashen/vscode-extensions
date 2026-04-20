@@ -36,7 +36,12 @@ import {
     FILE_READ_TOOL_NAME,
     FILE_GREP_TOOL_NAME,
     FILE_GLOB_TOOL_NAME,
+    SEMANTIC_SEARCH_TOOL_NAME,
 } from '../../../tools/types';
+import {
+    createSemanticSearchTool,
+    createSemanticSearchExecute,
+} from '../../../tools/semantic_search_tools';
 
 /**
  * Execute the Explore subagent
@@ -54,7 +59,8 @@ export async function executeExploreSubagent(
     model: 'haiku' | 'sonnet',
     getAnthropicClient: (modelId: AnthropicModel) => Promise<any>,
     previousMessages?: any[],
-    abortSignal?: AbortSignal
+    abortSignal?: AbortSignal,
+    semanticEnabled: boolean = true
 ): Promise<SubagentResult> {
     const isResume = previousMessages && previousMessages.length > 0;
     logInfo(`[ExploreSubagent] Starting with model: ${model}${isResume ? ' (resuming from previous)' : ''}`);
@@ -70,11 +76,15 @@ export async function executeExploreSubagent(
         const anthropicModel = await getAnthropicClient(modelId);
 
         // Create read-only tools for the subagent
-        const tools = {
+        const tools: Record<string, any> = {
             [FILE_READ_TOOL_NAME]: createReadTool(createReadExecute(projectPath), projectPath),
             [FILE_GREP_TOOL_NAME]: createGrepTool(createGrepExecute(projectPath)),
             [FILE_GLOB_TOOL_NAME]: createGlobTool(createGlobExecute(projectPath)),
         };
+
+        if (semanticEnabled) {
+            tools[SEMANTIC_SEARCH_TOOL_NAME] = createSemanticSearchTool(createSemanticSearchExecute(projectPath));
+        }
 
         logDebug(`[ExploreSubagent] Tools available: ${Object.keys(tools).join(', ')}`);
 
@@ -98,6 +108,15 @@ export async function executeExploreSubagent(
                 `
             });
         } else {
+            const searchInstructions = semanticEnabled
+                ? `1. Use grep for exact literals/identifiers (artifact names, endpoint keys, API paths, sequence names, mediator/property/variable tokens)
+                2. Use semantic_code_search for conceptual or natural-language queries where exact literals are unknown
+                3. Use one primary search tool per query round; only escalate from semantic to one targeted grep when confidence/fragment hints require it
+                4. Read only the most likely files and summarize findings concisely`
+                : `1. Use grep and glob to find relevant files and patterns
+                2. Read files that are likely to contain the answer
+                3. Summarize your findings concisely`;
+
             // Fresh start
             messages.push({
                 role: 'user',
@@ -108,9 +127,7 @@ export async function executeExploreSubagent(
 
                 ## Instructions
 
-                1. Use glob and grep to efficiently find relevant files
-                2. Read files that are likely to contain the answer
-                3. Summarize your findings concisely
+                ${searchInstructions}
 
                 Return your findings in the specified markdown format.
                 `

@@ -37,6 +37,94 @@ You can provide integration requirements as:
 - Text prompts: Describe your integration scenario in natural language.
 - Files: Upload relevant files, such as OpenAPI specifications, that provide additional context for the integration.
 
+### Semantic Worker Mode (Gradual Rollout)
+
+MI Copilot semantic indexing/search can run in an isolated worker process to improve crash isolation from heavy embedding/model tasks.
+
+#### Enable per workspace
+
+Set both settings in the target MI workspace:
+
+- `MI.IS_SEMANTIC_TOOL_ENABLED`: `true`
+- `MI.EMBEDDING_WORKER_ENABLED`: `true`
+
+#### Native runtime (lazy download)
+
+MI Copilot semantic mode downloads native dependencies at runtime (first use) and caches them in extension global storage:
+
+- `onnxruntime-node`
+- `better-sqlite3`
+
+Configure either of the following:
+
+- `MI.semanticRuntime.manifestUrl`: optional HTTPS URL for a platform/arch manifest override
+- `MI.semanticRuntime.bundleUrl`: optional HTTPS URL for a direct runtime zip bundle (overrides manifest)
+
+Optional:
+
+- `MI.semanticRuntime.bundleSha256`: SHA-256 checksum for bundle verification
+- `MI.semanticRuntime.runtimeDir`: custom cache directory (defaults to extension global storage)
+
+#### Publishing native runtime bundles and VSIX (local, step-by-step)
+
+Follow this sequence exactly.
+
+1. Keep the VSIX platform-neutral.
+   - Do not package platform-specific native binaries into VSIX.
+    - Native runtime modules are downloaded lazily at runtime; advanced users can override the manifest/bundle URL if needed.
+
+2. Build one runtime bundle per target platform/arch/Electron combination.
+   - Run this once on each target environment (or runner):
+
+```bash
+pnpm run build-native-runtime-target -- --platform darwin --arch arm64 --electron-version 34.3.0
+pnpm run build-native-runtime-target -- --platform darwin --arch x64 --electron-version 34.3.0
+pnpm run build-native-runtime-target -- --platform linux --arch x64 --electron-version 34.3.0
+pnpm run build-native-runtime-target -- --platform win32 --arch x64 --electron-version 34.3.0
+```
+
+This produces files like:
+- `native-runtime-<platform>-<arch>-electron-<version>.zip`
+- `native-runtime-<platform>-<arch>-electron-<version>.zip.sha256`
+
+3. Generate the manifest only after all target bundles are collected into `./native-runtime-artifacts`.
+
+```bash
+pnpm run generate-native-runtime-manifest -- \
+    --artifacts-dir ./native-runtime-artifacts \
+    --base-url https://github.com/<owner>/<repo>/releases/download/<tag>
+```
+
+4. Upload all bundle zips, checksum files, and `manifest.json` to your release location.
+
+5. Build VSIX as a separate final step:
+
+```bash
+pnpm run build
+```
+
+The VSIX is created at project root and copied to `./vsix`.
+
+Worker mode is enabled by default (`true`).
+
+#### Fast rollback
+
+If you observe instability in worker mode, set:
+
+- `MI.EMBEDDING_WORKER_ENABLED`: `false`
+
+The extension falls back to the in-process semantic path.
+
+#### Validation checklist
+
+Use this quick checklist after enabling worker mode:
+
+1. Open MI Copilot and run a semantic-style query.
+2. Confirm semantic search returns results (or graceful fallback guidance).
+3. Modify an artifact file and run another semantic query to confirm updates are reflected.
+4. Toggle `MI.EMBEDDING_WORKER_ENABLED` off and on; verify service restarts without window reload.
+5. If semantic worker is unavailable, confirm MI extension and non-semantic features continue working.
+
 <img src="https://github.com/wso2/docs-mi/blob/main/en/docs/assets/img/develop/mi-for-vscode/mi-copilot.png?raw=true" width="100%" />
 
 ## Samples

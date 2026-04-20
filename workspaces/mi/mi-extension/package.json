@@ -179,6 +179,48 @@
           "description": "Use local Maven within the extension",
           "scope": "resource"
         },
+        "MI.IS_SEMANTIC_TOOL_ENABLED": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable semantic code search tool and embedding service for MI Copilot agent mode",
+          "scope": "resource"
+        },
+        "MI.EMBEDDING_WORKER_ENABLED": {
+          "type": "boolean",
+          "default": true,
+          "description": "Run MI Copilot semantic embedding/index/search in an isolated worker process",
+          "scope": "resource"
+        },
+        "MI.semanticRuntime.downloadEnabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Allow MI Copilot to download semantic runtime native dependencies on first use.",
+          "scope": "resource"
+        },
+        "MI.semanticRuntime.manifestUrl": {
+          "type": "string",
+          "default": "",
+          "description": "Optional HTTPS URL to the semantic runtime bundle manifest JSON (platform/arch/electron keyed).",
+          "scope": "resource"
+        },
+        "MI.semanticRuntime.bundleUrl": {
+          "type": "string",
+          "default": "",
+          "description": "Direct HTTPS URL to a semantic runtime bundle zip. Overrides manifest lookup when set.",
+          "scope": "resource"
+        },
+        "MI.semanticRuntime.bundleSha256": {
+          "type": "string",
+          "default": "",
+          "description": "Optional SHA-256 checksum for the runtime bundle zip (hex).",
+          "scope": "resource"
+        },
+        "MI.semanticRuntime.runtimeDir": {
+          "type": "string",
+          "default": "",
+          "description": "Optional absolute directory to cache downloaded semantic runtime bundles. Defaults to ~/.wso2-mi/copilot/native-runtime.",
+          "scope": "resource"
+        },
         "MI.Scope": {
           "type": "string",
           "default": "",
@@ -1051,6 +1093,11 @@
     "watch": "tsc -p . -w",
     "package": "node ../../common-libs/scripts/package-vsix.js",
     "download-ls": "node ./scripts/download-ls.js",
+    "rebuild-native": "node scripts/rebuild-native.js",
+    "copy-native-modules": "node scripts/copy-native-modules.js",
+    "build-native-runtime-target": "node scripts/build-native-runtime-target.js",
+    "build-native-runtime-bundle": "node scripts/build-native-runtime-target.js",
+    "generate-native-runtime-manifest": "node scripts/generate-native-runtime-manifest.js",
     "build": "pnpm clean && pnpm run download-ls && pnpm run copyJSLibs && pnpm run copyLSLibs && pnpm run copyFonts && pnpm run copyDMUtils && pnpm run renameDMUtils && webpack --mode production --devtool hidden-source-map && pnpm run package && pnpm run postbuild",
     "compile-tests": "pnpm run compile",
     "watch-tests": "pnpm run watch",
@@ -1070,6 +1117,7 @@
   "devDependencies": {
     "@ai-sdk/devtools": "0.0.6",
     "@playwright/test": "1.55.1",
+    "@types/better-sqlite3": "7.6.8",
     "@types/mocha": "10.0.1",
     "@types/node": "22.15.21",
     "@types/vscode": "1.100.0",
@@ -1099,6 +1147,7 @@
     "@ai-sdk/anthropic": "3.0.64",
     "@anthropic-ai/tokenizer": "0.0.4",
     "@apidevtools/json-schema-ref-parser": "12.0.2",
+    "@xenova/transformers": "2.17.2",
     "@babel/core": "7.27.1",
     "@babel/plugin-transform-typescript": "7.27.1",
     "@iarna/toml": "2.2.5",
@@ -1121,6 +1170,8 @@
     "@wso2/playwright-vscode-tester": "workspace:*",
     "adm-zip": "0.5.16",
     "axios": "1.15.0",
+    "better-sqlite3": "11.8.0",
+    "canonicalize": "2.1.0",
     "copyfiles": "2.4.1",
     "cors-anywhere": "0.4.4",
     "dotenv": "16.5.0",
@@ -1137,6 +1188,7 @@
     "mustache": "4.2.0",
     "node-fetch": "3.3.2",
     "node-loader": "2.1.0",
+    "onnxruntime-node": "1.14.0",
     "pdf-lib": "1.17.1",
     "portfinder": "1.0.37",
     "recast": "0.23.11",

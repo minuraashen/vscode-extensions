@@ -29,6 +29,8 @@ import { AgentMode } from '@wso2/mi-core';
 import { getModeReminder } from './mode';
 import { logDebug } from '../../../copilot/logger';
 import { getStateMachine } from '../../../../stateMachine';
+import { getEmbeddingService } from '../../embedding-service/src/embedding-service/vscode-service';
+import { isSemanticToolEnabled } from '../../settings';
 
 const MAX_PROJECT_STRUCTURE_FILES = 50;
 const MAX_PROJECT_STRUCTURE_CHARS = 10000;
@@ -243,6 +245,7 @@ function formatProjectStructure(files: string[]): string {
             '.vscode/**',
             '.idea/**',
             '.mi-copilot/**',
+            '.data/**',
             '.env',
             '.env.local',
             '.env.development.local',
@@ -334,6 +337,34 @@ function getRuntimePaths(projectPath: string): {
 }
 
 // ============================================================================
+// Semantic Search Status
+// ============================================================================
+
+/**
+ * Returns a human-readable status string for the embedding service.
+ * Injected into the user prompt so the LLM knows whether semantic search is usable.
+ */
+function getSemanticSearchStatus(projectPath: string): string {
+    if (!isSemanticToolEnabled(projectPath)) {
+        return 'disabled by workspace setting (MI.IS_SEMANTIC_TOOL_ENABLED=false) — use grep/glob/file_read';
+    }
+
+    try {
+        const service = getEmbeddingService(projectPath);
+        if (service.isAvailable) {
+            const chunkCount = service.indexedChunkCount;
+            return `ready (${chunkCount} chunks indexed)`;
+        }
+        if (service.isInitializing) {
+            return 'initializing — may be available shortly; prefer grep/glob until ready';
+        }
+        return 'unavailable — use grep/glob/file_read as fallback';
+    } catch {
+        return 'unavailable — use grep/glob/file_read as fallback';
+    }
+}
+
+// ============================================================================
 // User Prompt Generation
 // ============================================================================
 
@@ -366,6 +397,7 @@ export async function getUserPrompt(params: UserPromptParams): Promise<UserPromp
     const mode = params.mode || 'edit';
     const modePolicyReminder = await getModeReminder({
         mode,
+        projectPath: params.projectPath,
     });
     const planFileReminder = mode === 'plan'
         ? await getPlanModeSessionReminder(params.projectPath, params.sessionId || 'default')
@@ -428,6 +460,7 @@ export async function getUserPrompt(params: UserPromptParams): Promise<UserPromp
         mode_policy: modePolicyReminder,
         plan_file_reminder: planFileReminder,
         connector_store_reminder: connectorStoreReminder,
+        env_semantic_search_status: getSemanticSearchStatus(params.projectPath),
     };
 
     // Render the template and split into content blocks

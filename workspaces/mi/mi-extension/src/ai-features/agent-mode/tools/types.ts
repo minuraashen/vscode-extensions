@@ -171,6 +171,8 @@ export const DEFERRED_TOOLS = new Set<string>([
 
 // DeepWiki MCP Tool (Anthropic prefixes with server name: deepwiki_ask_question)
 export const DEEPWIKI_ASK_QUESTION_TOOL_NAME = 'ask_question';
+// Semantic Search Tool
+export const SEMANTIC_SEARCH_TOOL_NAME = 'semantic_code_search';
 
 // ============================================================================
 // Subagent Types
@@ -434,3 +436,47 @@ export type TaskOutputExecuteFn = (args: {
     block?: boolean;
     timeout?: number;
 }) => Promise<TaskOutputResult>;
+
+// ============================================================================
+// Semantic Search Tool Execute Function Types
+// ============================================================================
+
+export interface SemanticSearchResult {
+    file_path: string;
+    line_range: [number, number];
+    xml_element_hierarchy: string[];
+    score: number;
+    chunk_id: string;
+    /** Actual source code snippet for this chunk */
+    content?: string;
+}
+
+/** Overall confidence of the search result set */
+export type SemanticSearchConfidence = 'high' | 'medium' | 'low' | 'very-low';
+
+export interface SemanticScoreDistribution {
+    min: number;
+    max: number;
+    mean: number;
+    top_score: number;
+}
+
+export interface SemanticSearchResponse {
+    results: SemanticSearchResult[];
+    confidence_threshold: number;
+    query_latency_ms: number;
+    /** Overall confidence level based on top result scores */
+    confidence: SemanticSearchConfidence;
+    /** Distribution statistics for returned result scores */
+    score_distribution: SemanticScoreDistribution;
+    /** Fraction (0-1) of returned chunks that are shorter than 3 lines */
+    fragment_chunk_ratio: number;
+    /** Human-readable query string that was searched */
+    query: string;
+}
+
+export type SemanticSearchExecuteFn = (args: {
+    query: string;
+    top_k?: number;
+    score_threshold?: number;
+}) => Promise<ToolResult>;

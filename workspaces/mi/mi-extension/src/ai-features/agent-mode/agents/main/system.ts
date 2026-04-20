@@ -18,6 +18,8 @@
 
 import { DEFERRED_TOOL_DESCRIPTIONS } from '../../tools/tool_load';
 import {
+    FILE_READ_TOOL_NAME,
+    FILE_GREP_TOOL_NAME,
     FILE_EDIT_TOOL_NAME,
     CONNECTOR_TOOL_NAME,
     CONTEXT_TOOL_NAME,
@@ -39,6 +41,7 @@ import {
     DEEPWIKI_ASK_QUESTION_TOOL_NAME,
     READ_SERVER_LOGS_TOOL_NAME,
     TOOL_LOAD_TOOL_NAME,
+    SEMANTIC_SEARCH_TOOL_NAME,
 } from '../../tools/types';
 import { SYNAPSE_GUIDE } from '../../context/synapse_guide';
 import { SYNAPSE_GUIDE as SYNAPSE_GUIDE_OLD } from '../../context/synapse_guide_old';
@@ -123,6 +126,19 @@ ${Object.entries(DEFERRED_TOOL_DESCRIPTIONS).map(([name, desc]) => `- ${name}: $
 ## File & search tools
 - Prefer dedicated file tools over ${BASH_TOOL_NAME} for file operations and content search.
 - Always read a file before editing or overwriting it.
+
+## Semantic search (${SEMANTIC_SEARCH_TOOL_NAME})
+- Token-efficiency objective: route exact-literal lookups to ${FILE_GREP_TOOL_NAME}; route conceptual/natural-language lookups to ${SEMANTIC_SEARCH_TOOL_NAME}.
+- Use for conceptual or cross-cutting queries where the artifact name, key, or file path is unknown.
+- Skip and use ${FILE_GREP_TOOL_NAME} directly when: the query contains known exact literals (artifact names, endpoint keys, API context paths, sequence names, mediator attributes, property/variable names such as camelCase/snake_case/SCREAMING_SNAKE_CASE tokens), the file path is already known, or the task is new-file creation.
+- Use one primary search tool per query round. If you choose ${SEMANTIC_SEARCH_TOOL_NAME}, do not also call ${FILE_GREP_TOOL_NAME} for the same query in that round unless an explicit escalation condition below is met.
+- Confidence-gated routing (deterministic):
+    - high confidence: answer directly from returned chunks when sufficient; If high-confidence chunks are insufficient to answer or safely edit, call ${FILE_READ_TOOL_NAME} around returned line ranges for more context before answering or editing.
+    - medium confidence: answer from returned chunks when sufficient; run one targeted ${FILE_GREP_TOOL_NAME} using exact literals only if chunks are unclear or incomplete. Do not fan out to ${FILE_READ_TOOL_NAME} across multiple files by default.
+    - low or very-low confidence: skip semantic follow-up and switch directly to ${FILE_GREP_TOOL_NAME}.
+- ${FILE_READ_TOOL_NAME} escalation gate after semantic/grep: only read a file when (a) a chunk from that file has score >= 0.38 and appears truncated/incomplete, or (b) ${FILE_GREP_TOOL_NAME} confirmed the target pattern but returned insufficient context.
+- When escalating to ${FILE_READ_TOOL_NAME} from semantic results, reuse returned line ranges (lines="X-Y") and read a scoped window with offset/limit (for example ±20 lines), not the whole file by default.
+- For broad multi-file synthesis that requires reasoning across many results, prefer the Explore subagent over repeated semantic search calls.
 
 ## Shell (${BASH_TOOL_NAME})
 - Use only for system operations (build, test, runtime/log checks, curl). Not for file/content search when dedicated tools exist.
@@ -297,6 +313,10 @@ const SYSTEM_PROMPT_OLD = SYSTEM_PROMPT
     .replace(SYNAPSE_GUIDE, SYNAPSE_GUIDE_OLD)
     .replace(CONNECTOR_DOCUMENTATION, CONNECTOR_DOCUMENTATION_OLD);
 
+function removeSemanticSearchPolicy(prompt: string): string {
+    return prompt.replace(/\n## Semantic search[\s\S]*?\n## Shell /, '\n## Shell ');
+}
+
 /**
  * Generates the system prompt for the MI design agent
  */
@@ -305,11 +325,11 @@ export interface SystemPromptSelection {
     runtimeVersionDetected: boolean;
 }
 
-export function getSystemPrompt(runtimeVersion?: string | null): SystemPromptSelection {
+export function getSystemPrompt(runtimeVersion?: string | null, semanticEnabled: boolean = true): SystemPromptSelection {
     if (!runtimeVersion) {
         logWarn('[SystemPrompt] MI runtime version could not be detected. Defaulting to modern syntax guidance (>=4.4.0).');
         return {
-            prompt: SYSTEM_PROMPT,
+            prompt: semanticEnabled ? SYSTEM_PROMPT : removeSemanticSearchPolicy(SYSTEM_PROMPT),
             runtimeVersionDetected: false,
         };
     }
@@ -320,7 +340,9 @@ export function getSystemPrompt(runtimeVersion?: string | null): SystemPromptSel
     }
 
     return {
-        prompt: useOldGuide ? SYSTEM_PROMPT_OLD : SYSTEM_PROMPT,
+        prompt: semanticEnabled
+            ? (useOldGuide ? SYSTEM_PROMPT_OLD : SYSTEM_PROMPT)
+            : removeSemanticSearchPolicy(useOldGuide ? SYSTEM_PROMPT_OLD : SYSTEM_PROMPT),
         runtimeVersionDetected: true,
     };
 }
