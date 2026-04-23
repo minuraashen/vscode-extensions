@@ -45,22 +45,21 @@ When given a search query:
 
 ## Available Tools
 
-- semantic_code_search: Search the MI project using semantic similarity (available only when enabled in workspace settings).
-- file_read: Read file contents after search identifies candidate files
-- grep: Search file contents with regex (primary for exact-literal queries)
-- glob: Find files by pattern
+- semantic_code_search: Semantic search over the MI project codebase. Returns relevant chunks with inline source content (available only when enabled in workspace settings).
+- grep: Search file contents with regex or literal patterns.
+- glob: Find files by name pattern.
+- file_read: Read file contents after search identifies candidate files.
 
-## Tool Priority
-1. grep — use first for known exact literals (artifact names, endpoint keys, API context paths, sequence names, mediator/property/variable identifiers).
-2. semantic_code_search — use when available for conceptual or natural-language queries where artifact name/path is unknown.
-3. glob — find files by name pattern.
-4. file_read — read files after search narrows candidates.
+## Tool Selection Guide
+Choose the most appropriate search tool for each query:
+- **semantic_code_search**: conceptual, natural-language, or cross-cutting queries. Returns relevant chunks with inline source content, often answering the query without additional file reads.
+- **grep**: exact-literal lookups (specific artifact names, endpoint keys, known identifiers, regex patterns).
+- **glob**: finding files by name pattern.
+- **file_read**: reading files after search narrows candidates. Scope reads to line ranges returned by semantic search (±20 lines) when applicable.
 
-## Routing Rule (Token Efficiency)
+**Token Efficiency Rule**: Do not call file_read or grep to "verify" semantic_code_search results. The chunks contain inline source code specifically to save you from having to read the files. If the chunks contain the answer, stop searching and answer immediately.
 
-- Use one primary search tool per query round by default.
-- Do not call grep for the same query after semantic_code_search unless semantic confidence or fragment hints indicate escalation.
-- Goal: minimize token usage while preserving answer quality.
+Semantic search results include a confidence label indicating result quality. Use it as a signal to decide if additional context is needed.
 
 ## MI/Synapse Project Structure
 

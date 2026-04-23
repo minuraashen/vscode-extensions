@@ -14,15 +14,10 @@ import {
     WorkerLogEventPayload,
     WorkerStatusPayload,
 } from './ipc-types';
-import { SQLiteDB } from '../db/sqlite';
+import { OramaDB } from '../db/orama';
 import { Embedder } from './embedder';
 import { downloadModel, isModelDownloaded } from './model-manager';
 import { Pipeline } from './pipeline';
-import {
-    configureSemanticNativeRuntimeBootstrap,
-    ensureSemanticNativeRuntimeDependencies,
-    getSemanticNativeRuntimeFailureReason,
-} from './native-runtime-bootstrap';
 
 interface WorkerRuntimeState {
     available: boolean;
@@ -42,7 +37,7 @@ const state: WorkerRuntimeState = {
     reason: 'Worker not initialized',
 };
 
-let db: SQLiteDB | null = null;
+let db: OramaDB | null = null;
 let embedder: Embedder | null = null;
 let pipeline: Pipeline | null = null;
 let artifactDirs: string[] = [];
@@ -210,32 +205,32 @@ function clearPolling(): void {
     }
 }
 
-function updateChunkCount(): void {
-    state.chunkCount = db ? db.getChunkCount() : 0;
+async function updateChunkCount(): Promise<void> {
+    state.chunkCount = db ? await db.getChunkCount() : 0;
 }
 
 async function runInitialIndexing(dirs: string[]): Promise<void> {
     if (!pipeline || dirs.length === 0) {
-        updateChunkCount();
+        await updateChunkCount();
         return;
     }
 
     await pipeline.processInitial(dirs, (stage, detail, fileIndex, totalFiles) => {
         emitProgress(stage, detail, fileIndex, totalFiles);
     });
-    updateChunkCount();
+    await updateChunkCount();
 }
 
 async function runIncrementalIndexing(dirs: string[]): Promise<void> {
     if (!pipeline || dirs.length === 0) {
-        updateChunkCount();
+        await updateChunkCount();
         return;
     }
 
     await pipeline.processIncremental(dirs, (stage, detail, fileIndex, totalFiles) => {
         emitProgress(stage, detail, fileIndex, totalFiles);
     });
-    updateChunkCount();
+    await updateChunkCount();
 }
 
 async function handleInit(req: IpcRequestMessage): Promise<IpcResponseMessage> {
@@ -280,25 +275,6 @@ async function handleInit(req: IpcRequestMessage): Promise<IpcResponseMessage> {
     emitStatusChanged();
 
     try {
-        configureSemanticNativeRuntimeBootstrap(nativeRuntime);
-
-        const nativeRuntimeReady = await ensureSemanticNativeRuntimeDependencies();
-        if (!nativeRuntimeReady) {
-            const failureReason = getSemanticNativeRuntimeFailureReason();
-            const message = failureReason
-                ? `Semantic runtime dependencies are unavailable in worker mode. ${failureReason}`
-                : 'Semantic runtime dependencies are unavailable in worker mode. Automatic dependency resolution failed.';
-            state.initializing = false;
-            state.available = false;
-            state.reason = message;
-            emitStatusChanged();
-            return responseError(req, {
-                code: 'INTERNAL',
-                message,
-                retryable: true,
-            });
-        }
-
         const dbDirectory = path.dirname(dbPath);
         if (!fs.existsSync(dbDirectory)) {
             fs.mkdirSync(dbDirectory, { recursive: true });
@@ -309,7 +285,8 @@ async function handleInit(req: IpcRequestMessage): Promise<IpcResponseMessage> {
             await downloadModel();
         }
 
-        const nextDb = new SQLiteDB(dbPath);
+        const nextDb = new OramaDB(dbPath);
+        await nextDb.initialize();
         const nextEmbedder = new Embedder();
 
         // Phase 1: Load the ONNX model — this is the slow part for large models
@@ -342,7 +319,7 @@ async function handleInit(req: IpcRequestMessage): Promise<IpcResponseMessage> {
         // Phase 2: Mark worker as available immediately — the host can now query
         // and search while indexing runs in the background asynchronously.
         // This prevents the `init` IPC request from timing out on large projects.
-        state.chunkCount = db.getChunkCount();
+        state.chunkCount = await db.getChunkCount();
         state.initializing = false;
         state.available = true;
         state.reason = 'Worker ready';
@@ -356,8 +333,8 @@ async function handleInit(req: IpcRequestMessage): Promise<IpcResponseMessage> {
             emitStatusChanged();
 
             runInitialIndexing(artifactDirs)
-                .then(() => {
-                    state.chunkCount = db ? db.getChunkCount() : 0;
+                .then(async () => {
+                    state.chunkCount = db ? await db.getChunkCount() : 0;
                     state.initializing = false;
                     state.reason = 'Worker ready';
                     emitStatusChanged();
@@ -518,31 +495,31 @@ async function handleSearchSemantic(req: IpcRequestMessage): Promise<IpcResponse
     const startedAt = now();
 
     const queryEmbedding = await embedder.embed(req.payload.query);
-    const chunkEmbeddings = db.getAllChunkEmbeddings();
+    
+    // Orama semantic search directly
+    const rawHits = await db.semanticSearch(
+        req.payload.query,
+        topK,
+        scoreThreshold,
+        Array.from(queryEmbedding)
+    );
 
-    const hits: SemanticSearchHit[] = chunkEmbeddings
-        .map((chunk) => {
-            const score = cosineSimilarity(queryEmbedding, new Float32Array(chunk.embedding.buffer));
-            return {
-                id: chunk.id,
-                filePath: chunk.filePath,
-                chunkType: chunk.chunkType,
-                startLine: chunk.startLine,
-                endLine: chunk.endLine,
-                context: chunk.context,
-                score,
-            } satisfies SemanticSearchHit;
-        })
-        .filter((hit) => hit.score >= scoreThreshold)
-        .sort((a, b) => b.score - a.score)
-        .slice(0, topK);
+    const hits: SemanticSearchHit[] = rawHits.map(hit => ({
+        id: hit.id,
+        filePath: hit.filePath,
+        chunkType: hit.chunkType,
+        startLine: hit.startLine,
+        endLine: hit.endLine,
+        context: hit.context,
+        score: hit.score ?? 0,
+    }));
 
-    state.chunkCount = chunkEmbeddings.length;
+    state.chunkCount = await db.getChunkCount();
 
     const result: SemanticSearchResponsePayload = {
         query: req.payload.query,
         latencyMs: now() - startedAt,
-        totalChunksScanned: chunkEmbeddings.length,
+        totalChunksScanned: state.chunkCount, // Not exactly scanned, but the total db size
         hits,
     };
 
@@ -626,25 +603,7 @@ function isInboundRequest(value: unknown): value is IpcInboundMessage {
         && typeof value.method === 'string';
 }
 
-function cosineSimilarity(a: Float32Array, b: Float32Array): number {
-    let dot = 0;
-    let normA = 0;
-    let normB = 0;
 
-    const len = Math.min(a.length, b.length);
-    for (let i = 0; i < len; i++) {
-        const va = a[i];
-        const vb = b[i];
-        dot += va * vb;
-        normA += va * va;
-        normB += vb * vb;
-    }
-
-    if (normA === 0 || normB === 0) {
-        return 0;
-    }
-    return dot / (Math.sqrt(normA) * Math.sqrt(normB));
-}
 
 process.on('message', async (raw: unknown) => {
     if (!isInboundRequest(raw)) {

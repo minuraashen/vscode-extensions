@@ -97,6 +97,7 @@ MI Runtime logs:
   - http_access.log (HTTP requests): {{env_mi_http_access_log_path}}
   - wso2-mi-service.log (service lifecycle): {{env_mi_service_log_path}}
   - correlation.log (request tracing): {{env_mi_correlation_log_path}}
+Semantic search index: {{env_semantic_search_status}}
 </system-reminder>
 
 <system-reminder>
@@ -344,7 +345,7 @@ function getRuntimePaths(projectPath: string): {
  * Returns a human-readable status string for the embedding service.
  * Injected into the user prompt so the LLM knows whether semantic search is usable.
  */
-function getSemanticSearchStatus(projectPath: string): string {
+async function getSemanticSearchStatus(projectPath: string): Promise<string> {
     if (!isSemanticToolEnabled(projectPath)) {
         return 'disabled by workspace setting (MI.IS_SEMANTIC_TOOL_ENABLED=false) — use grep/glob/file_read';
     }
@@ -352,7 +353,7 @@ function getSemanticSearchStatus(projectPath: string): string {
     try {
         const service = getEmbeddingService(projectPath);
         if (service.isAvailable) {
-            const chunkCount = service.indexedChunkCount;
+            const chunkCount = await service.getIndexedChunkCount();
             return `ready (${chunkCount} chunks indexed)`;
         }
         if (service.isInitializing) {
@@ -460,7 +461,7 @@ export async function getUserPrompt(params: UserPromptParams): Promise<UserPromp
         mode_policy: modePolicyReminder,
         plan_file_reminder: planFileReminder,
         connector_store_reminder: connectorStoreReminder,
-        env_semantic_search_status: getSemanticSearchStatus(params.projectPath),
+        env_semantic_search_status: await getSemanticSearchStatus(params.projectPath),
     };
 
     // Render the template and split into content blocks

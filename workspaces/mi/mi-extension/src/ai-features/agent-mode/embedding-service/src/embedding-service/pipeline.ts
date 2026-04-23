@@ -1,15 +1,8 @@
-import { Watcher, FileChange } from './watcher';
+import { Watcher, FileChange } from './file-watcher';
 import { XMLChunker } from './chunker';
 import { Embedder } from './embedder';
-import { SQLiteDB, ChunkMetadata } from '../db/sqlite';
+import { OramaDB, ChunkMetadata } from '../db/orama';
 
-/**
- * Progress callback for reporting embedding pipeline status.
- * @param stage - Current stage of the pipeline
- * @param detail - Human-readable detail message
- * @param fileIndex - 0-based index of the file currently being processed
- * @param totalFiles - Total number of files to process
- */
 export type PipelineProgressCallback = (
   stage: 'scanning' | 'embedding' | 'updating' | 'complete',
   detail: string,
@@ -17,22 +10,13 @@ export type PipelineProgressCallback = (
   totalFiles: number
 ) => void;
 
-/**
- * Pipeline with Incremental Embedding
- * 
- * Key features:
- * - Compare with existing chunks by content hash
- * - Only re-embed chunks with changed content hashes
- * - Reuse embeddings from unchanged chunks
- */
-
 export class Pipeline {
   private watcher: Watcher;
   private chunker: XMLChunker;
   private embedder: Embedder;
-  private db: SQLiteDB;
+  private db: OramaDB;
 
-  constructor(db: SQLiteDB, embedder: Embedder) {
+  constructor(db: OramaDB, embedder: Embedder) {
     this.watcher = new Watcher();
     this.chunker = new XMLChunker(embedder);
     this.embedder = embedder;
@@ -43,7 +27,7 @@ export class Pipeline {
     console.log('Initial processing started...');
 
     // Seed watcher with persisted file hashes so unchanged files are skipped on reopen
-    const savedHashes = this.db.getLatestFileHashes();
+    const savedHashes = await this.db.getLatestFileHashesAsync();
     if (savedHashes.size > 0) {
       this.watcher.seedFromDB(savedHashes);
       console.log(`[Pipeline] Seeded watcher with ${savedHashes.size} persisted file hashes`);
@@ -82,7 +66,7 @@ export class Pipeline {
       if (!change.exists) {
         console.log(`Deleting chunks for removed file: ${change.filePath}`);
         onProgress?.('updating', `Removing: ${fileName}`, i, totalFiles);
-        this.db.deleteChunksByFile(change.filePath);
+        await this.db.deleteChunksByFile(change.filePath);
         continue;
       }
 
@@ -98,6 +82,9 @@ export class Pipeline {
     if (totalFiles > 0) {
       onProgress?.('complete', `Processed ${totalFiles} file(s)`, totalFiles, totalFiles);
     }
+    
+    // Persist to disk after batch
+    await this.db.persist();
   }
 
   private async processFile(filePath: string, fileHash: string): Promise<void> {
@@ -106,20 +93,15 @@ export class Pipeline {
     const chunks = await this.chunker.chunkFile(filePath);
     console.log(`  Extracted ${chunks.length} chunks`);
 
-    // Get existing chunks for this file
-    const existingChunks = this.db.getChunksByFile(filePath);
-
-    // Build map of existing chunks by their unique key (file_path, chunk_index, start_line, end_line)
+    const existingChunks = await this.db.getChunksByFile(filePath);
     const existingByLocation = new Map<string, typeof existingChunks[0]>();
     for (const chunk of existingChunks) {
       const key = `${chunk.chunkIndex}:${chunk.startLine}:${chunk.endLine}`;
       existingByLocation.set(key, chunk);
     }
 
-    // Track which existing chunks were matched (for cleanup of removed chunks)
-    const matchedChunkIds = new Set<number>();
-
-    const chunkIndexToDbId = new Map<number, number>();
+    const matchedChunkIds = new Set<string>();
+    const chunkIndexToDbId = new Map<number, string>();
     let reusedCount = 0;
     let embeddedCount = 0;
 
@@ -139,55 +121,37 @@ export class Pipeline {
         referencedSequences: chunk.referencedSequences,
       };
 
-      // Check if we have an existing chunk at this location
       const locationKey = `${chunk.chunkIndex}:${chunk.startLine}:${chunk.endLine}`;
       const existingChunk = existingByLocation.get(locationKey);
 
       let embedding: Float32Array;
-      let dbId: number;
+      let dbId: string;
 
       if (existingChunk && existingChunk.contentHash === chunk.contentHash) {
-        // Existing chunk with same content - reuse embedding and update metadata
-        embedding = new Float32Array(existingChunk.embedding.buffer);
-        this.db.updateChunk(existingChunk.id, metadata, embedding, chunk.embeddingText);
+        embedding = new Float32Array(existingChunk.embedding);
+        await this.db.updateChunk(existingChunk.id, metadata, embedding, chunk.embeddingText);
         dbId = existingChunk.id;
         matchedChunkIds.add(dbId);
         reusedCount++;
       } else if (existingChunk) {
-        // Existing chunk but content changed - generate new embedding and update
         embedding = await this.embedder.embed(chunk.embeddingText);
-        this.db.updateChunk(existingChunk.id, metadata, embedding, chunk.embeddingText);
+        await this.db.updateChunk(existingChunk.id, metadata, embedding, chunk.embeddingText);
         dbId = existingChunk.id;
         matchedChunkIds.add(dbId);
         embeddedCount++;
       } else {
-        // New chunk - generate embedding and insert
         embedding = await this.embedder.embed(chunk.embeddingText);
-        dbId = this.db.insertChunk(metadata, embedding, chunk.embeddingText);
+        dbId = await this.db.insertChunk(metadata, embedding, chunk.embeddingText);
         embeddedCount++;
       }
 
       chunkIndexToDbId.set(chunk.chunkIndex, dbId);
-
-      // Link all artifact references
-      if (chunk.referencedSequences && chunk.referencedSequences.length > 0) {
-        for (const artifactRef of chunk.referencedSequences) {
-          const artifactDef = this.db.getSequenceDefinition(artifactRef);
-          if (artifactDef) {
-            const artifactName = artifactRef.includes(':')
-              ? artifactRef.split(':', 2)[1]
-              : artifactRef;
-            this.db.linkSequenceReference(dbId, artifactDef.id, artifactName);
-          }
-        }
-      }
     }
 
-    // Delete chunks that no longer exist in the file (chunks that weren't matched)
     let deletedCount = 0;
     for (const existingChunk of existingChunks) {
       if (!matchedChunkIds.has(existingChunk.id)) {
-        this.db.deleteChunk(existingChunk.id);
+        await this.db.deleteChunk(existingChunk.id);
         deletedCount++;
       }
     }

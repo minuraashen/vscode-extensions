@@ -1102,6 +1102,7 @@ export async function executeAgent(
                             toolName: part.toolName,
                             toolInput: displayInput,
                             loadingAction,
+                            toolCallId: part.toolCallId,
                         });
                     }
                     break;
@@ -1139,6 +1140,7 @@ export async function executeAgent(
                             toolName: part.toolName,
                             toolOutput: { success: result.success },
                             completedAction: resultAction,
+                            toolCallId: part.toolCallId,
                         };
 
                         // Add shell output fields for shell tool

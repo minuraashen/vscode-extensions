@@ -113,17 +113,7 @@ export async function activate(context: vscode.ExtensionContext) {
 		workspace.onDidChangeConfiguration((event) => {
 			for (const folder of (workspace.workspaceFolders ?? [])) {
 				const semanticToggleChanged = event.affectsConfiguration('MI.IS_SEMANTIC_TOOL_ENABLED', folder.uri);
-				const workerToggleChanged = event.affectsConfiguration('MI.EMBEDDING_WORKER_ENABLED', folder.uri);
-				if (!semanticToggleChanged && !workerToggleChanged) {
-					continue;
-				}
-
-				if (workerToggleChanged && isSemanticToolEnabledForUri(folder.uri)) {
-					disposeEmbeddingService(folder.uri.fsPath)
-						.then(() => getEmbeddingService(folder.uri.fsPath).start())
-						.catch(err => {
-							console.warn(`[EmbeddingService] Restart failed for ${folder.uri.fsPath}:`, err?.message);
-						});
+				if (!semanticToggleChanged) {
 					continue;
 				}
 

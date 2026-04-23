@@ -69,13 +69,6 @@ export interface InitRequestPayload {
 	modelRootPath: string;
 	pollIntervalMs: number;
 	maxTokens: number;
-	nativeRuntime?: {
-		enabled?: boolean;
-		runtimeDir?: string;
-		manifestUrl?: string;
-		bundleUrl?: string;
-		bundleSha256?: string;
-	};
 }
 
 export interface HealthRequestPayload {
@@ -114,7 +107,7 @@ export interface WorkerStatusPayload {
 }
 
 export interface SemanticSearchHit {
-	id: number;
+	id: string;
 	filePath: string;
 	chunkType: string;
 	startLine: number;

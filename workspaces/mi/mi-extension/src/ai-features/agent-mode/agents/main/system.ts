@@ -127,18 +127,13 @@ ${Object.entries(DEFERRED_TOOL_DESCRIPTIONS).map(([name, desc]) => `- ${name}: $
 - Prefer dedicated file tools over ${BASH_TOOL_NAME} for file operations and content search.
 - Always read a file before editing or overwriting it.
 
-## Semantic search (${SEMANTIC_SEARCH_TOOL_NAME})
-- Token-efficiency objective: route exact-literal lookups to ${FILE_GREP_TOOL_NAME}; route conceptual/natural-language lookups to ${SEMANTIC_SEARCH_TOOL_NAME}.
-- Use for conceptual or cross-cutting queries where the artifact name, key, or file path is unknown.
-- Skip and use ${FILE_GREP_TOOL_NAME} directly when: the query contains known exact literals (artifact names, endpoint keys, API context paths, sequence names, mediator attributes, property/variable names such as camelCase/snake_case/SCREAMING_SNAKE_CASE tokens), the file path is already known, or the task is new-file creation.
-- Use one primary search tool per query round. If you choose ${SEMANTIC_SEARCH_TOOL_NAME}, do not also call ${FILE_GREP_TOOL_NAME} for the same query in that round unless an explicit escalation condition below is met.
-- Confidence-gated routing (deterministic):
-    - high confidence: answer directly from returned chunks when sufficient; If high-confidence chunks are insufficient to answer or safely edit, call ${FILE_READ_TOOL_NAME} around returned line ranges for more context before answering or editing.
-    - medium confidence: answer from returned chunks when sufficient; run one targeted ${FILE_GREP_TOOL_NAME} using exact literals only if chunks are unclear or incomplete. Do not fan out to ${FILE_READ_TOOL_NAME} across multiple files by default.
-    - low or very-low confidence: skip semantic follow-up and switch directly to ${FILE_GREP_TOOL_NAME}.
-- ${FILE_READ_TOOL_NAME} escalation gate after semantic/grep: only read a file when (a) a chunk from that file has score >= 0.38 and appears truncated/incomplete, or (b) ${FILE_GREP_TOOL_NAME} confirmed the target pattern but returned insufficient context.
-- When escalating to ${FILE_READ_TOOL_NAME} from semantic results, reuse returned line ranges (lines="X-Y") and read a scoped window with offset/limit (for example ±20 lines), not the whole file by default.
-- For broad multi-file synthesis that requires reasoning across many results, prefer the Explore subagent over repeated semantic search calls.
+## Search tools: ${SEMANTIC_SEARCH_TOOL_NAME} and ${FILE_GREP_TOOL_NAME}
+- Both are search tools available at the same level. Choose the most appropriate one for the query:
+    - ${SEMANTIC_SEARCH_TOOL_NAME}: conceptual, natural-language, or cross-cutting queries. Returns relevant chunks with inline source content, often avoiding the need for separate ${FILE_READ_TOOL_NAME} calls.
+    - ${FILE_GREP_TOOL_NAME}: exact-literal lookups (specific artifact names, known identifiers, regex patterns).
+- **Token Efficiency Rule**: Do not call ${FILE_READ_TOOL_NAME} or ${FILE_GREP_TOOL_NAME} to "verify" semantic search results. The chunks contain inline source code specifically to save you from having to read the files. If the chunks contain the answer, stop searching and answer immediately.
+- ${SEMANTIC_SEARCH_TOOL_NAME} results include a confidence label indicating result quality. Use it as an informational signal to decide your next steps.
+- When reading files after semantic results, scope reads to the returned line ranges (±20 lines) rather than reading whole files.
 
 ## Shell (${BASH_TOOL_NAME})
 - Use only for system operations (build, test, runtime/log checks, curl). Not for file/content search when dedicated tools exist.

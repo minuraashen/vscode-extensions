@@ -275,6 +275,8 @@ export interface AgentEvent {
     toolName?: string;
     toolInput?: unknown;
     toolOutput?: unknown;
+    /** Tool call ID for matching tool_call → tool_result pairs in the UI */
+    toolCallId?: string;
     /** User-friendly loading action text (e.g., "creating", "reading") - sent with tool_call */
     loadingAction?: string;
     /** User-friendly completed action text (e.g., "created", "read") - sent with tool_result */

@@ -109,9 +109,9 @@ export async function executeExploreSubagent(
             });
         } else {
             const searchInstructions = semanticEnabled
-                ? `1. Use grep for exact literals/identifiers (artifact names, endpoint keys, API paths, sequence names, mediator/property/variable tokens)
-                2. Use semantic_code_search for conceptual or natural-language queries where exact literals are unknown
-                3. Use one primary search tool per query round; only escalate from semantic to one targeted grep when confidence/fragment hints require it
+                ? `1. Choose the most appropriate search tool: semantic_code_search for conceptual/natural-language queries, grep for exact-literal lookups
+                2. Semantic search returns relevant chunks with inline source content — often sufficient without additional file reads
+                3. Semantic results include a confidence label; use it as a signal to decide if additional context is needed
                 4. Read only the most likely files and summarize findings concisely`
                 : `1. Use grep and glob to find relevant files and patterns
                 2. Read files that are likely to contain the answer

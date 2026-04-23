@@ -20,19 +20,9 @@ import * as path from 'path';
 import * as fs from 'fs';
 import * as vscode from 'vscode';
 import { ChildProcess, fork } from 'child_process';
-import { SQLiteDB } from '../db/sqlite';
-import { Embedder } from './embedder';
-import { Pipeline } from './pipeline';
-import { createEmbeddingFileWatcher } from './vscode-watcher';
+import { createEmbeddingFileWatcher } from './file-watcher';
 import { getCopilotProjectStorageDir } from '../../../storage-paths';
 import { getWso2MiModelsDir, isModelDownloaded, downloadModel } from './model-manager';
-import {
-    configureSemanticNativeRuntimeBootstrap,
-    ensureSemanticNativeRuntimeDependencies,
-    getSemanticNativeRuntimeFailureReason,
-    invalidateSemanticNativeRuntime,
-    NativeRuntimeBootstrapConfig,
-} from './native-runtime-bootstrap';
 import {
     IPC_PROTOCOL_VERSION,
     IpcRequestMethod,
@@ -68,11 +58,9 @@ export interface VSCodeEmbeddingServiceConfig {
     artifactsSubPath: string;
     /** Polling interval in milliseconds for incremental re-indexing */
     pollIntervalMs: number;
-    /** Maximum tokens per embedding chunk */
-    maxTokens: number;
-    /** Absolute path to the SQLite database file */
+    /** Absolute path to the database file */
     dbPath: string;
-    /** Absolute path to the ONNX model file */
+    /** Absolute path to the ONNX model root directory */
     modelPath: string;
 }
 
@@ -85,11 +73,10 @@ export function resolveDefaultConfig(projectPath: string): VSCodeEmbeddingServic
         projectPath,
         artifactsSubPath: 'src/main/wso2mi/artifacts',
         pollIntervalMs: 60_000,
-        maxTokens: 256,
         // Store embeddings DB in the per-project copilot storage dir, co-located with
         // the chat history. Never written into the user's project directory.
-        // ~/.wso2-mi/copilot/projects/<name-hash>/embeddings.db
-        dbPath: path.join(getCopilotProjectStorageDir(projectPath), 'embeddings.db'),
+        // ~/.wso2-mi/copilot/projects/<name-hash>/embeddings.json
+        dbPath: path.join(getCopilotProjectStorageDir(projectPath), 'embeddings.json'),
         // Root directory for all WSO2 MI models (~/.wso2-mi/models).
         // @xenova/transformers resolves model IDs relative to this path, so
         // 'isuruwijesiri/all-MiniLM-L6-v2-code-search-512' resolves to
@@ -142,26 +129,24 @@ export async function disposeAllEmbeddingServices(): Promise<void> {
 /**
  * VSCode-Integrated Embedding Service
  *
- * Background service that incrementally indexes MI project XML files within
- * the VSCode extension process. Reuses the existing Pipeline, Embedder, and
- * SQLiteDB components from the standalone embedding-service package.
+ * Thin coordinator that manages a forked worker process which runs the full
+ * indexing pipeline (chunker → embedder → OramaDB). All heavy computation
+ * (ONNX model loading, embedding generation, DB writes, incremental indexing)
+ * happens in the worker. This class handles:
+ *   - Worker lifecycle (start, stop, restart with exponential backoff)
+ *   - IPC communication (request/response + event handling)
+ *   - VS Code UI integration (status bar, progress notifications)
+ *   - Real-time file watching (VS Code FileSystemWatcher)
  *
  * Lifecycle:
- *   1. `start()` — initializes the embedder, runs initial indexing, starts polling.
- *   2. `notifyFileChange(filePath)` — triggers immediate re-index for a single file.
- *   3. `stop()` — cleans up timers and closes resources.
- *
- * Fault tolerance:
- *   - Corrupted DB: logs error, attempts to delete and recreate DB, continues.
- *   - Missing model: logs warning, marks service as unavailable.
- *   - All errors are caught and logged; the service never throws into the caller.
+ *   1. `start()` — downloads model (if needed, with UI progress), forks worker,
+ *      sends `init` IPC, sets up file watcher.
+ *   2. `semanticSearch(query, topK, threshold)` — sends search request to worker.
+ *   3. `notifyFileChange(filePath)` — sends file change notification to worker.
+ *   4. `stop()` — kills worker, disposes watchers and status bar.
  */
 export class VSCodeEmbeddingService {
     private config: VSCodeEmbeddingServiceConfig;
-    private db: SQLiteDB | null = null;
-    private embedder: Embedder | null = null;
-    private pipeline: Pipeline | null = null;
-    private pollTimer: NodeJS.Timeout | null = null;
     private fileWatcher: { dispose(): void } | null = null;
     private _isAvailable = false;
     private _isInitializing = false;
@@ -213,39 +198,21 @@ export class VSCodeEmbeddingService {
         }
     }
 
-    /** Expose the SQLite database handle for query-time access. */
-    get database(): SQLiteDB | null {
-        return this.db;
-    }
-
-    /** Expose the embedder for query-time embedding. */
-    get embedderInstance(): Embedder | null {
-        return this.embedder;
-    }
-
-    /** Returns indexed chunk count from active backend (worker or in-process DB). */
-    get indexedChunkCount(): number {
-        if (this.isWorkerModeActive()) {
-            return this.workerStatusSnapshot?.chunkCount ?? 0;
-        }
-        return this.db?.getChunkCount() ?? 0;
-    }
-
-    /** Whether worker-backed query path is currently active. */
-    get isWorkerQueryActive(): boolean {
-        return this.isWorkerModeActive();
+    /** Returns indexed chunk count from the worker status snapshot. */
+    async getIndexedChunkCount(): Promise<number> {
+        return this.workerStatusSnapshot?.chunkCount ?? 0;
     }
 
     /**
-     * Execute semantic search in the worker process when worker mode is active.
-     * Returns null when worker mode is inactive or worker call fails.
+     * Execute semantic search via the worker process.
+     * Returns the search response payload, or null if the worker is unavailable.
      */
-    async semanticSearchWithWorker(
+    async semanticSearch(
         query: string,
         topK: number,
         scoreThreshold: number,
     ): Promise<SemanticSearchResponsePayload | null> {
-        if (!this.isWorkerModeActive()) {
+        if (!this.workerReady) {
             return null;
         }
 
@@ -259,7 +226,7 @@ export class VSCodeEmbeddingService {
             );
             return response;
         } catch (error) {
-            console.warn('[EmbeddingService] Worker semantic search failed; fallback to in-process path:', error);
+            console.warn('[EmbeddingService] Worker semantic search failed:', error);
             return null;
         }
     }
@@ -295,57 +262,7 @@ export class VSCodeEmbeddingService {
 
     private async _start(): Promise<void> {
         try {
-            const nativeRuntimeConfig = this.getNativeRuntimeBootstrapConfig();
-            configureSemanticNativeRuntimeBootstrap(nativeRuntimeConfig);
-
-            this.showStatusBar(
-                '$(cloud-download) MI: Downloading dependencies…',
-                'Resolving semantic runtime dependencies for this platform'
-            );
-
-            const nativeRuntimeReady = await ensureSemanticNativeRuntimeDependencies();
-            if (!nativeRuntimeReady) {
-                const failureReason = getSemanticNativeRuntimeFailureReason();
-                const msg = failureReason
-                    ? `Semantic runtime dependencies are unavailable. ${failureReason}`
-                    : 'Semantic runtime dependencies are unavailable. Automatic download could not complete for this platform/runtime.';
-                console.error(`[EmbeddingService] ${msg}`);
-                this._isAvailable = false;
-                this._isInitializing = false;
-                this.showStatusBar('$(warning) MI: Semantic Runtime Missing', msg);
-                this._onReady.fire(false);
-                return;
-            }
-
-            if (this.useWorkerProcess()) {
-                const workerStarted = await this.tryStartWorkerMode();
-                if (workerStarted) {
-                    this.ensureWorkerModeWatcher();
-                    return;
-                }
-
-                console.error('[EmbeddingService] Worker mode startup failed; in-process fallback is disabled while worker mode is enabled');
-                this._isAvailable = false;
-                this._isInitializing = false;
-                this.showStatusBar(
-                    '$(error) MI: Worker Init Failed',
-                    'Semantic worker failed to start. Disable MI.EMBEDDING_WORKER_ENABLED to use in-process mode.'
-                );
-                this._onReady.fire(false);
-                return;
-            }
-
-            // Show status bar indicator while indexing
-            this.showStatusBar('$(sync~spin) MI: Indexing…', 'Embedding service is indexing project files');
-
-            // Ensure the DB directory exists (~/.wso2-mi/copilot/projects/<hash>/)
-            const dbDir = path.dirname(this.config.dbPath);
-            if (!fs.existsSync(dbDir)) {
-                fs.mkdirSync(dbDir, { recursive: true });
-                console.log(`[EmbeddingService] Created DB directory: ${dbDir}`);
-            }
-
-            // Download model to ~/.wso2-mi/models/ if not already present
+            // ── Phase 1: Download model with VS Code progress UI (one-time) ──
             if (!isModelDownloaded()) {
                 console.log(`[EmbeddingService] Model not found — starting download to ${this.config.modelPath}`);
                 this.showStatusBar('$(cloud-download) MI: Downloading model…',
@@ -373,137 +290,21 @@ export class VSCodeEmbeddingService {
                 }
             }
 
-            console.log(`[EmbeddingService] Model ready at: ${this.config.modelPath}`);
-
-            // Initialize DB with recovery
-            this.db = this.initializeDB();
-            if (!this.db) {
-                this.showStatusBar('$(error) MI: DB Error', 'Embedding database initialization failed');
-                this._onReady.fire(false);
+            // ── Phase 2: Start the worker process ────────────────────────────
+            const workerStarted = await this.tryStartWorkerMode();
+            if (workerStarted) {
+                this.ensureFileWatcher();
                 return;
             }
 
-            console.log(`[EmbeddingService] Database initialized at: ${this.config.dbPath}`);
-
-            // Initialize embedder
-            this.embedder = new Embedder();
-            await this.embedder.initialize(this.config.modelPath);
-
-            // Create pipeline
-            this.pipeline = new Pipeline(this.db, this.embedder);
-
-            // Run initial indexing with detailed staged progress notification
-            const dirs = this.getArtifactDirs();
-            if (dirs.length > 0) {
-                const savedHashes = this.db.getLatestFileHashes();
-                const isFirstRun = savedHashes.size === 0;
-                const progressTitle = isFirstRun
-                    ? 'MI Copilot: Generating embeddings'
-                    : 'MI Copilot: Updating embeddings';
-
-                await vscode.window.withProgress(
-                    {
-                        location: vscode.ProgressLocation.Notification,
-                        title: progressTitle,
-                        cancellable: false,
-                    },
-                    async (progress) => {
-                        // Stage 1: Scanning
-                        progress.report({ message: 'Scanning project files…' });
-                        this.showStatusBar('$(sync~spin) MI: Scanning…', 'Scanning project for artifact files');
-
-                        await this.pipeline!.processInitial(dirs, (stage, detail, fileIndex, totalFiles) => {
-                            switch (stage) {
-                                case 'scanning':
-                                    progress.report({ message: 'Scanning project files…' });
-                                    this.showStatusBar('$(sync~spin) MI: Scanning…', detail);
-                                    break;
-                                case 'embedding': {
-                                    // Stage 2: Embedding generation
-                                    const pct = totalFiles > 0
-                                        ? Math.round((fileIndex / totalFiles) * 100)
-                                        : 0;
-                                    progress.report({ message: `Generating embeddings — ${detail}` });
-                                    this.showStatusBar(
-                                        `$(sync~spin) MI: Embedding (${pct}%)`,
-                                        `Embedding generation: ${detail}`
-                                    );
-                                    break;
-                                }
-                                case 'updating': {
-                                    // Stage 3: Storing / updating embeddings in DB
-                                    const pct = totalFiles > 0
-                                        ? Math.round((fileIndex / totalFiles) * 100)
-                                        : 0;
-                                    progress.report({ message: `Updating embeddings — ${detail}` });
-                                    this.showStatusBar(
-                                        `$(sync~spin) MI: Storing (${pct}%)`,
-                                        `Embeddings update: ${detail}`
-                                    );
-                                    break;
-                                }
-                                case 'complete':
-                                    // Stage 4: Done
-                                    progress.report({ message: 'Embeddings created ✓' });
-                                    break;
-                            }
-                        });
-
-                        progress.report({ message: 'Embeddings ready ✓' });
-                    }
-                );
-            }
-
-            // Start polling with progress on incremental updates
-            this.pollTimer = setInterval(async () => {
-                try {
-                    const currentDirs = this.getArtifactDirs();
-                    if (currentDirs.length > 0 && this.pipeline) {
-                        await this.pipeline.processIncremental(currentDirs, (stage, detail) => {
-                            if (stage === 'embedding' || stage === 'updating') {
-                                this.showStatusBar(
-                                    `$(sync~spin) MI: Updating…`,
-                                    `Incremental update: ${detail}`
-                                );
-                            }
-                        });
-                        // Restore ready status bar after incremental update
-                        if (this._isAvailable && this.db) {
-                            const count = this.db.getChunkCount();
-                            this.showStatusBar(
-                                `$(check) MI: Indexed (${count})`,
-                                `Semantic search ready — ${count} chunks indexed`
-                            );
-                        }
-                    }
-                } catch (error) {
-                    console.error('[EmbeddingService] Incremental processing error:', error);
-                }
-            }, this.config.pollIntervalMs);
-
-            // Start file system watcher for real-time change detection
-            try {
-                this.fileWatcher = createEmbeddingFileWatcher(
-                    this.config.projectPath,
-                    this
-                );
-            } catch (watcherError) {
-                console.warn('[EmbeddingService] File watcher creation failed (non-fatal):', watcherError);
-            }
-
-            this._isAvailable = true;
-
-            // ── Completion indicator ──────────────────────────────────────
-            const chunkCount = this.db.getChunkCount();
-            console.log(
-                `[EmbeddingService] ✅ Ready for project: ${this.config.projectPath} ` +
-                `(${chunkCount} chunks indexed, DB: ${this.config.dbPath})`
-            );
+            console.error('[EmbeddingService] Worker process startup failed');
+            this._isAvailable = false;
+            this._isInitializing = false;
             this.showStatusBar(
-                `$(check) MI: Indexed (${chunkCount})`,
-                `Semantic search ready — ${chunkCount} chunks indexed`
+                '$(error) MI: Worker Init Failed',
+                'Semantic worker failed to start.'
             );
-            this._onReady.fire(true);
+            this._onReady.fire(false);
         } catch (error) {
             console.error('[EmbeddingService] Failed to start:', error);
             this._isAvailable = false;
@@ -529,8 +330,6 @@ export class VSCodeEmbeddingService {
                 dbPath: this.config.dbPath,
                 modelRootPath: this.config.modelPath,
                 pollIntervalMs: this.config.pollIntervalMs,
-                maxTokens: this.config.maxTokens,
-                nativeRuntime: this.getNativeRuntimeBootstrapConfig(),
             }, WORKER_INIT_TIMEOUT_MS);
 
             await this.sendWorkerRequest('health', { ping: true });
@@ -583,7 +382,7 @@ export class VSCodeEmbeddingService {
         }
     }
 
-    private ensureWorkerModeWatcher(): void {
+    private ensureFileWatcher(): void {
         if (this.fileWatcher) {
             return;
         }
@@ -594,46 +393,23 @@ export class VSCodeEmbeddingService {
                 this
             );
         } catch (watcherError) {
-            console.warn('[EmbeddingService] File watcher creation failed in worker mode (non-fatal):', watcherError);
+            console.warn('[EmbeddingService] File watcher creation failed (non-fatal):', watcherError);
         }
     }
 
     /**
      * Notify the service that a specific file has changed.
-     * Triggers an immediate incremental re-index for that file's directory.
+     * Triggers an immediate incremental re-index for that file's directory
+     * by forwarding the event to the worker process.
      */
     async notifyFileChange(filePath: string): Promise<void> {
-        if (this.isWorkerModeActive()) {
-            try {
-                await this.sendWorkerRequest('notify.fileChange', { filePath });
-                return;
-            } catch (error) {
-                console.warn(`[EmbeddingService] Worker notify.fileChange failed for ${filePath}; falling back to in-process path:`, error);
-            }
-        }
-
-        if (!this._isAvailable || !this.pipeline) {
+        if (!this.workerReady) {
             return;
         }
         try {
-            const dir = path.dirname(filePath);
-            const fileName = path.basename(filePath);
-            this.showStatusBar(`$(sync~spin) MI: Updating…`, `Re-indexing: ${fileName}`);
-            await this.pipeline.processIncremental([dir], (stage, detail) => {
-                if (stage === 'embedding' || stage === 'updating') {
-                    this.showStatusBar(`$(sync~spin) MI: Updating…`, detail);
-                }
-            });
-            // Restore ready status
-            if (this.db) {
-                const count = this.db.getChunkCount();
-                this.showStatusBar(
-                    `$(check) MI: Indexed (${count})`,
-                    `Semantic search ready — ${count} chunks indexed`
-                );
-            }
+            await this.sendWorkerRequest('notify.fileChange', { filePath });
         } catch (error) {
-            console.error(`[EmbeddingService] Error processing file change for ${filePath}:`, error);
+            console.warn(`[EmbeddingService] Worker notify.fileChange failed for ${filePath}:`, error);
         }
     }
 
@@ -651,23 +427,6 @@ export class VSCodeEmbeddingService {
             this.fileWatcher.dispose();
             this.fileWatcher = null;
         }
-        if (this.pollTimer) {
-            clearInterval(this.pollTimer);
-            this.pollTimer = null;
-        }
-        if (this.embedder) {
-            await this.embedder.close();
-            this.embedder = null;
-        }
-        if (this.db) {
-            try {
-                this.db.close();
-            } catch {
-                // Ignore close errors
-            }
-            this.db = null;
-        }
-        this.pipeline = null;
         this._isAvailable = false;
         this._initPromise = null;
     }
@@ -686,53 +445,14 @@ export class VSCodeEmbeddingService {
         this._statusBarItem.show();
     }
 
-    // ── Worker Supervisor Scaffolding (disabled by default) ───────────
-
-    private useWorkerProcess(): boolean {
-        const projectUri = vscode.Uri.file(this.config.projectPath);
-        const workspaceFolder = vscode.workspace.getWorkspaceFolder(projectUri);
-
-        if (workspaceFolder) {
-            return vscode.workspace
-                .getConfiguration('MI', workspaceFolder.uri)
-                .get<boolean>('EMBEDDING_WORKER_ENABLED', true);
-        }
-
-        return vscode.workspace
-            .getConfiguration('MI')
-            .get<boolean>('EMBEDDING_WORKER_ENABLED', true);
-    }
-
-    private getNativeRuntimeBootstrapConfig(): NativeRuntimeBootstrapConfig {
-        const projectUri = vscode.Uri.file(this.config.projectPath);
-        const workspaceFolder = vscode.workspace.getWorkspaceFolder(projectUri);
-        const config = workspaceFolder
-            ? vscode.workspace.getConfiguration('MI', workspaceFolder.uri)
-            : vscode.workspace.getConfiguration('MI');
-
-        // Only pass runtimeDir if explicitly configured; otherwise let bootstrap code
-        // fall back to MI_COPILOT_NATIVE_RUNTIME_DIR environment variable
-        const runtimeDirSetting = config.get<string>('semanticRuntime.runtimeDir', '').trim();
-
-        return {
-            enabled: config.get<boolean>('semanticRuntime.downloadEnabled', true),
-            runtimeDir: runtimeDirSetting || undefined,
-            manifestUrl: config.get<string>('semanticRuntime.manifestUrl', ''),
-            bundleUrl: config.get<string>('semanticRuntime.bundleUrl', ''),
-            bundleSha256: config.get<string>('semanticRuntime.bundleSha256', ''),
-        };
-    }
-
-    private isWorkerModeActive(): boolean {
-        return this.useWorkerProcess() && this.workerReady;
-    }
+    // ── Worker Supervisor ─────────────────────────────────────────────
 
     private getWorkerEntryPath(): string {
         return path.join(__dirname, 'embedding-worker.js');
     }
 
     private startWorkerSupervisor(): void {
-        if (!this.useWorkerProcess() || this.workerProcess) {
+        if (this.workerProcess) {
             return;
         }
 
@@ -830,12 +550,12 @@ export class VSCodeEmbeddingService {
             proc.removeAllListeners('error');
             proc.kill();
         } catch {
-            // Ignore shutdown errors in scaffolding mode
+            // Ignore shutdown errors
         }
     }
 
     private scheduleWorkerRestart(reason: string): void {
-        if (!this.useWorkerProcess() || this.workerStopRequested) {
+        if (this.workerStopRequested) {
             return;
         }
 
@@ -846,7 +566,7 @@ export class VSCodeEmbeddingService {
         if (this.workerRestartAttempts >= WORKER_RESTART_MAX_ATTEMPTS) {
             console.error(
                 `[EmbeddingService] Worker restart attempts exceeded (${WORKER_RESTART_MAX_ATTEMPTS}); ` +
-                `keeping worker mode disabled for this service lifecycle. Last reason: ${reason}`
+                `keeping worker disabled for this service lifecycle. Last reason: ${reason}`
             );
             return;
         }
@@ -943,7 +663,7 @@ export class VSCodeEmbeddingService {
                     }
                 }
             } else if (message.method === 'index.progress') {
-                // Progress events are informational — update status bar if in worker mode
+                // Progress events are informational — update status bar
                 const payload = message.payload as Record<string, unknown> | undefined;
                 if (payload) {
                     const stage = payload.stage as string;
@@ -1035,96 +755,5 @@ export class VSCodeEmbeddingService {
                 reject(error);
             }
         });
-    }
-
-    /**
-     * Initialize SQLite database with corruption recovery.
-     * Detects native module ABI mismatches and provides actionable guidance.
-     */
-    private initializeDB(): SQLiteDB | null {
-        console.log(`[EmbeddingService] initializeDB() — dbPath: ${this.config.dbPath}`);
-        console.log(`[EmbeddingService] Node version: ${process.version}, ABI: ${process.versions.modules}`);
-        try {
-            const db = new SQLiteDB(this.config.dbPath);
-            console.log(`[EmbeddingService] initializeDB() — SUCCESS`);
-            return db;
-        } catch (error) {
-            const errMsg = (error as any)?.message || '';
-            console.error('[EmbeddingService] DB initialization failed — FULL ERROR:', error);
-            console.error('[EmbeddingService] Error name:', (error as any)?.name);
-            console.error('[EmbeddingService] Error message:', errMsg);
-            console.error('[EmbeddingService] Error stack:', (error as any)?.stack);
-
-            // Detect ABI mismatch — the most common cause for native module failures
-            if (errMsg.includes('NODE_MODULE_VERSION') || errMsg.includes('was compiled against') ||
-                errMsg.includes('module did not self-register') || errMsg.includes('Cannot find module')) {
-                console.error(
-                    '[EmbeddingService] ⚠️  Native module ABI mismatch detected.\n' +
-                    '  Native runtime bundle does not match this VS Code runtime.\n' +
-                    '  Deleting cached bundle so the next attempt re-downloads the correct one.'
-                );
-                // Evict the bad bundle so the next start() attempt triggers a fresh download.
-                invalidateSemanticNativeRuntime();
-                vscode.window.showWarningMessage(
-                    'MI Copilot: Semantic search unavailable — runtime binary mismatch. Reloading window will re-download the correct bundle.',
-                    'Reload Window'
-                ).then(choice => {
-                    if (choice === 'Reload Window') {
-                        vscode.commands.executeCommand('workbench.action.reloadWindow');
-                    }
-                });
-                return null;
-            }
-
-            try {
-                // Attempt to delete corrupted DB and recreate
-                if (fs.existsSync(this.config.dbPath)) {
-                    fs.unlinkSync(this.config.dbPath);
-                }
-                // Also remove WAL and SHM files if present
-                const walPath = this.config.dbPath + '-wal';
-                const shmPath = this.config.dbPath + '-shm';
-                if (fs.existsSync(walPath)) {
-                    fs.unlinkSync(walPath);
-                }
-                if (fs.existsSync(shmPath)) {
-                    fs.unlinkSync(shmPath);
-                }
-                const db2 = new SQLiteDB(this.config.dbPath);
-                console.log(`[EmbeddingService] initializeDB() — RECOVERY SUCCESS`);
-                return db2;
-            } catch (recoveryError) {
-                console.error('[EmbeddingService] DB recovery failed — FULL ERROR:', recoveryError);
-                console.error('[EmbeddingService] Recovery error message:', (recoveryError as any)?.message);
-                return null;
-            }
-        }
-    }
-
-    /**
-     * Get artifact directories to scan for the configured project.
-     * Scans the project root for directories containing MI artifacts.
-     */
-    private getArtifactDirs(): string[] {
-        const artifactPath = path.join(this.config.projectPath, this.config.artifactsSubPath);
-        if (fs.existsSync(artifactPath)) {
-            return [artifactPath];
-        }
-        // Fallback: look in direct subdirectories (multi-module projects)
-        const dirs: string[] = [];
-        try {
-            const entries = fs.readdirSync(this.config.projectPath, { withFileTypes: true });
-            for (const entry of entries) {
-                if (entry.isDirectory()) {
-                    const subArtifact = path.join(this.config.projectPath, entry.name, this.config.artifactsSubPath);
-                    if (fs.existsSync(subArtifact)) {
-                        dirs.push(subArtifact);
-                    }
-                }
-            }
-        } catch {
-            // Ignore directory read errors
-        }
-        return dirs;
     }
 }

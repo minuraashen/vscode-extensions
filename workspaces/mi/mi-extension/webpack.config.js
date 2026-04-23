@@ -54,23 +54,7 @@ module.exports = {
     devtoolModuleFilenameTemplate: '../[resource-path]'
   },
   externals: {
-    vscode: 'commonjs vscode',
-    // Native / large modules are always externalized.
-    // In production they are resolved from the semantic runtime downloader cache
-    // (global storage); in dev they may resolve from local node_modules.
-    'better-sqlite3': 'commonjs better-sqlite3',
-    // onnxruntime-node must also be external so the extension bundle and
-    // @xenova/transformers share the SAME CJS module instance at runtime.
-    // This allows embedder.ts to temporarily patch InferenceSession.create
-    // to inject the desired ONNX execution providers (CoreML/MPS, CPU, etc.)
-    // before the pipeline is loaded.
-    'onnxruntime-node': 'commonjs onnxruntime-node',
-    // @xenova/transformers has complex internal circular dependencies and
-    // optional native deps (sharp, canvas) that cause TDZ errors and bundle
-    // evaluation failures when webpack tries to inline the package.
-    // It is pure JS, so it ships in the semantic runtime bundle alongside
-    // better-sqlite3 and onnxruntime-node and is loaded via requireSemanticNativeModule.
-    '@xenova/transformers': 'commonjs @xenova/transformers',
+    vscode: 'commonjs vscode'
   },
   resolve: {
     extensions: ['.ts', '.js'],
