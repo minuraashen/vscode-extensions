@@ -243,7 +243,6 @@ async function handleInit(req: IpcRequestMessage): Promise<IpcResponseMessage> {
     const modelRootPath = req.payload.modelRootPath;
     const artifactsSubPath = req.payload.artifactsSubPath;
     const pollIntervalMs = req.payload.pollIntervalMs;
-    const nativeRuntime = req.payload.nativeRuntime;
 
     if (typeof projectPath !== 'string' || projectPath.trim().length === 0) {
         return invalidPayload(req, 'init.projectPath is required');
@@ -259,10 +258,6 @@ async function handleInit(req: IpcRequestMessage): Promise<IpcResponseMessage> {
     }
     if (typeof pollIntervalMs !== 'number' || pollIntervalMs <= 0) {
         return invalidPayload(req, 'init.pollIntervalMs must be a positive number');
-    }
-
-    if (nativeRuntime !== undefined && !isObject(nativeRuntime)) {
-        return invalidPayload(req, 'init.nativeRuntime must be an object when provided');
     }
 
     state.initializing = true;
@@ -440,6 +435,7 @@ async function handleIndexIncremental(req: IpcRequestMessage): Promise<IpcRespon
     }
 
     await runIncrementalIndexing(dirs);
+    emitStatusChanged();
 
     return responseOk(req, {
         accepted: true,
@@ -463,6 +459,7 @@ async function handleNotifyFileChange(req: IpcRequestMessage): Promise<IpcRespon
 
     const dir = path.dirname(req.payload.filePath);
     await runIncrementalIndexing([dir]);
+    emitStatusChanged();
 
     return responseOk(req, {
         accepted: true,

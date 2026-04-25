@@ -4,4 +4,3 @@ synapse-schemas/mediators/connectors.xsd
 # test resources
 src/test/e2e-playwright-tests/data/new-project/**/*
 test-results/**/*
-native-runtime-artifacts/

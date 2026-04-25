@@ -24,8 +24,14 @@ export interface ChunkRecord extends ChunkMetadata {
   embedding: Float32Array; // Stored natively as array of numbers in Orama, but returned as Float32Array locally for compat
 }
 
+// Bump this when the schema changes to force recreation of the persisted DB.
+const DB_SCHEMA_VERSION = '2';
+
 const oramaSchema = {
-  filePath: 'string',
+  // 'enum' → Flat tree → exact-match filter (where: { eq: ... }) works correctly.
+  // 'string' → Radix tree → only tokenized full-text search; { eq: ... } filter silently
+  // returns an empty set, so getChunksByFile / getSequenceDefinition would always return [].
+  filePath: 'enum',
   fileHash: 'string',
   chunkType: 'string',
   chunkIndex: 'number',
@@ -34,7 +40,7 @@ const oramaSchema = {
   timestamp: 'number',
   contentHash: 'string',
   contextJson: 'string',
-  sequenceKey: 'string',
+  sequenceKey: 'enum',
   isSequenceDefinition: 'boolean',
   referencedSequencesJson: 'string',
   embeddingText: 'string',
@@ -61,7 +67,15 @@ export class OramaDB {
     const jsonPath = this.dbPath.endsWith('.json') ? this.dbPath : `${this.dbPath}.json`;
     this.dbPath = jsonPath;
 
-    if (fs.existsSync(this.dbPath)) {
+    // A sibling file tracks the schema version so we can detect and discard stale persisted DBs
+    // whose internal tree structures are incompatible with the current schema.
+    const versionPath = `${this.dbPath}.version`;
+    const persistedVersion = fs.existsSync(versionPath)
+      ? fs.readFileSync(versionPath, 'utf-8').trim()
+      : null;
+    const schemaCompatible = persistedVersion === DB_SCHEMA_VERSION;
+
+    if (schemaCompatible && fs.existsSync(this.dbPath)) {
       try {
         this.db = (await restoreFromFile('json', this.dbPath)) as any;
         this.isInitialized = true;
@@ -69,11 +83,15 @@ export class OramaDB {
       } catch (e) {
         console.warn('[OramaDB] Failed to restore from file, creating new DB:', e);
       }
+    } else if (!schemaCompatible && fs.existsSync(this.dbPath)) {
+      console.warn(`[OramaDB] Schema version mismatch (persisted=${persistedVersion}, current=${DB_SCHEMA_VERSION}). Recreating DB.`);
+      fs.rmSync(this.dbPath);
     }
 
-    this.db = await create({
+    this.db = create({
       schema: oramaSchema,
-    });
+    }) as any;
+    fs.writeFileSync(versionPath, DB_SCHEMA_VERSION, 'utf-8');
     this.isInitialized = true;
   }
 
@@ -149,9 +167,7 @@ export class OramaDB {
         sequenceKey: {
           eq: artifactName
         },
-        isSequenceDefinition: {
-          eq: true
-        }
+        isSequenceDefinition: true,
       },
       limit: 1
     });
@@ -178,19 +194,6 @@ export class OramaDB {
       limit: 100000, // Reasonable max limit or paginated
     });
     return results.hits.map(hit => this.mapDocToRecord(hit.id, hit.document as any));
-  }
-
-  getLatestFileHashes(): Map<string, string> {
-    // Note: Orama doesn't have a SELECT DISTINCT equivalent natively built-in easily without iteration.
-    // For small/medium DBs, iterating hits is fast. For very large DBs, it might be slow.
-    // However, we just need unique file paths.
-    // We can just keep an in-memory cache if we want, but since it's asked on startup, we have to iterate the whole DB.
-    // Alternatively, just load all filePaths and Hashes.
-    
-    // To do this synchronously without await, Orama doesn't support sync search.
-    // Wait, the original was synchronous. We must make sure callers are updated to handle async if needed.
-    // Let's implement this synchronously by reading the internal documents directly if possible, or we have to change the interface.
-    return new Map();
   }
 
   async getLatestFileHashesAsync(): Promise<Map<string, string>> {
