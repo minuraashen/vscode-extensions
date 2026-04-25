@@ -37,6 +37,46 @@ You can provide integration requirements as:
 - Text prompts: Describe your integration scenario in natural language.
 - Files: Upload relevant files, such as OpenAPI specifications, that provide additional context for the integration.
 
+### Semantic Worker Mode (Gradual Rollout)
+
+MI Copilot semantic indexing/search can run in an isolated worker process to improve crash isolation from heavy embedding/model tasks.
+
+#### Enable per workspace
+
+Set both settings in the target MI workspace:
+
+- `MI.IS_SEMANTIC_TOOL_ENABLED`: `true`
+- `MI.EMBEDDING_WORKER_ENABLED`: `true`
+
+#### Semantic stack packaging
+
+The semantic worker now uses webpack-bundled JavaScript dependencies only:
+
+- `@huggingface/transformers` for embeddings and tokenization
+- `@orama/orama` plus `@orama/plugin-data-persistence` for the vector store
+
+There are no separate native runtime bundles to publish for the semantic worker anymore. The extension still downloads the model files on first use and caches them in extension storage, but the worker runtime itself is bundled into the VSIX.
+
+Worker mode is enabled by default (`true`).
+
+#### Fast rollback
+
+If you observe instability in worker mode, set:
+
+- `MI.EMBEDDING_WORKER_ENABLED`: `false`
+
+The extension falls back to the in-process semantic path.
+
+#### Validation checklist
+
+Use this quick checklist after enabling worker mode:
+
+1. Open MI Copilot and run a semantic-style query.
+2. Confirm semantic search returns results (or graceful fallback guidance).
+3. Modify an artifact file and run another semantic query to confirm updates are reflected.
+4. Toggle `MI.EMBEDDING_WORKER_ENABLED` off and on; verify service restarts without window reload.
+5. If semantic worker is unavailable, confirm the model cache exists and the MI extension still works without semantic search.
+
 <img src="https://github.com/wso2/docs-mi/blob/main/en/docs/assets/img/develop/mi-for-vscode/mi-copilot.png?raw=true" width="100%" />
 
 ## Samples

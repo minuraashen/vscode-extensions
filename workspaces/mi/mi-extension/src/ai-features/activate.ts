@@ -33,6 +33,9 @@ import {
 } from './configUtils';
 import { initializeLangfuse, shutdownLangfuse } from './agent-mode/langfuse-setup';
 import { ENABLE_LANGFUSE } from './agent-mode/agents/main/agent';
+import { getEmbeddingService } from './agent-mode/embedding-service/src/embedding-service/vscode-service';
+import { isSemanticToolEnabledForUri } from './agent-mode/settings';
+
 
 export function activateAiPanel(context: vscode.ExtensionContext) {
     // Initialize Langfuse OpenTelemetry tracing (dev mode only)
@@ -52,6 +55,22 @@ export function activateAiPanel(context: vscode.ExtensionContext) {
     // Register the AI panel command
     context.subscriptions.push(
         vscode.commands.registerCommand(COMMANDS.OPEN_AI_PANEL, (initialPrompt?: PromptObject) => {
+            // Lazily start embedding services the first time MI Copilot is opened.
+            // Each service is a singleton — subsequent calls return immediately if
+            // already running, so this is safe to call on every panel open.
+            const folders = vscode.workspace.workspaceFolders ?? [];
+            for (const folder of folders) {
+                if (!isSemanticToolEnabledForUri(folder.uri)) {
+                    continue;
+                }
+                getEmbeddingService(folder.uri.fsPath).start().catch(err => {
+                    console.error(`[EmbeddingService] Background start FAILED for ${folder.uri.fsPath}:`, err);
+                    console.error(`[EmbeddingService] Error name: ${err?.name}`);
+                    console.error(`[EmbeddingService] Error message: ${err?.message}`);
+                    console.error(`[EmbeddingService] Error stack: ${err?.stack}`);
+                    vscode.window.showErrorMessage(`MI Copilot: Embedding service error — ${err?.message}`);
+                });
+            }
             openAIWebview(initialPrompt);
         })
     );

@@ -18,6 +18,8 @@
 
 import { DEFERRED_TOOL_DESCRIPTIONS } from '../../tools/tool_load';
 import {
+    FILE_READ_TOOL_NAME,
+    FILE_GREP_TOOL_NAME,
     FILE_EDIT_TOOL_NAME,
     CONNECTOR_TOOL_NAME,
     CONTEXT_TOOL_NAME,
@@ -39,6 +41,7 @@ import {
     DEEPWIKI_ASK_QUESTION_TOOL_NAME,
     READ_SERVER_LOGS_TOOL_NAME,
     TOOL_LOAD_TOOL_NAME,
+    SEMANTIC_SEARCH_TOOL_NAME,
 } from '../../tools/types';
 import { SYNAPSE_GUIDE } from '../../context/synapse_guide';
 import { SYNAPSE_GUIDE as SYNAPSE_GUIDE_OLD } from '../../context/synapse_guide_old';
@@ -123,6 +126,14 @@ ${Object.entries(DEFERRED_TOOL_DESCRIPTIONS).map(([name, desc]) => `- ${name}: $
 ## File & search tools
 - Prefer dedicated file tools over ${BASH_TOOL_NAME} for file operations and content search.
 - Always read a file before editing or overwriting it.
+
+## Search tools: ${SEMANTIC_SEARCH_TOOL_NAME} and ${FILE_GREP_TOOL_NAME}
+- Both are search tools available at the same level. Choose the most appropriate one for the query:
+    - ${SEMANTIC_SEARCH_TOOL_NAME}: conceptual, natural-language, or cross-cutting queries. Returns relevant chunks with inline source content, often avoiding the need for separate ${FILE_READ_TOOL_NAME} calls.
+    - ${FILE_GREP_TOOL_NAME}: exact-literal lookups (specific artifact names, known identifiers, regex patterns).
+- **Token Efficiency Rule**: Do not call ${FILE_READ_TOOL_NAME} or ${FILE_GREP_TOOL_NAME} to "verify" semantic search results. The chunks contain inline source code specifically to save you from having to read the files. If the chunks contain the answer, stop searching and answer immediately.
+- ${SEMANTIC_SEARCH_TOOL_NAME} results include a confidence label indicating result quality. Use it as an informational signal to decide your next steps.
+- When reading files after semantic results, scope reads to the returned line ranges (±20 lines) rather than reading whole files.
 
 ## Shell (${BASH_TOOL_NAME})
 - Use only for system operations (build, test, runtime/log checks, curl). Not for file/content search when dedicated tools exist.
@@ -297,6 +308,10 @@ const SYSTEM_PROMPT_OLD = SYSTEM_PROMPT
     .replace(SYNAPSE_GUIDE, SYNAPSE_GUIDE_OLD)
     .replace(CONNECTOR_DOCUMENTATION, CONNECTOR_DOCUMENTATION_OLD);
 
+function removeSemanticSearchPolicy(prompt: string): string {
+    return prompt.replace(/\n## Semantic search[\s\S]*?\n## Shell /, '\n## Shell ');
+}
+
 /**
  * Generates the system prompt for the MI design agent
  */
@@ -305,11 +320,11 @@ export interface SystemPromptSelection {
     runtimeVersionDetected: boolean;
 }
 
-export function getSystemPrompt(runtimeVersion?: string | null): SystemPromptSelection {
+export function getSystemPrompt(runtimeVersion?: string | null, semanticEnabled: boolean = true): SystemPromptSelection {
     if (!runtimeVersion) {
         logWarn('[SystemPrompt] MI runtime version could not be detected. Defaulting to modern syntax guidance (>=4.4.0).');
         return {
-            prompt: SYSTEM_PROMPT,
+            prompt: semanticEnabled ? SYSTEM_PROMPT : removeSemanticSearchPolicy(SYSTEM_PROMPT),
             runtimeVersionDetected: false,
         };
     }
@@ -320,7 +335,9 @@ export function getSystemPrompt(runtimeVersion?: string | null): SystemPromptSel
     }
 
     return {
-        prompt: useOldGuide ? SYSTEM_PROMPT_OLD : SYSTEM_PROMPT,
+        prompt: semanticEnabled
+            ? (useOldGuide ? SYSTEM_PROMPT_OLD : SYSTEM_PROMPT)
+            : removeSemanticSearchPolicy(useOldGuide ? SYSTEM_PROMPT_OLD : SYSTEM_PROMPT),
         runtimeVersionDetected: true,
     };
 }

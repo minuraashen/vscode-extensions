@@ -64,6 +64,7 @@ import {
     KILL_TASK_TOOL_NAME,
     WEB_SEARCH_TOOL_NAME,
     WEB_FETCH_TOOL_NAME,
+    SEMANTIC_SEARCH_TOOL_NAME,
 } from './tools';
 import { logInfo, logError, logDebug } from '../../../copilot/logger';
 import { ChatHistoryManager, TOOL_USE_INTERRUPTION_CONTEXT } from '../../chat-history-manager';
@@ -87,6 +88,8 @@ import {
 
 // Import types from mi-core (shared with visualizer)
 import { AgentEvent, AgentEventType, FileObject, ImageObject, AgentMode, ModelSettings } from '@wso2/mi-core';
+import { getEmbeddingService } from '../../embedding-service/src/embedding-service/vscode-service';
+import { isSemanticToolEnabled } from '../../settings';
 
 // Re-export types for other modules that import from agent.ts
 export type { AgentEvent, AgentEventType };
@@ -434,6 +437,15 @@ export async function executeAgent(
     try {
         logInfo(`[Agent] Starting agent execution for project: ${request.projectPath}`);
 
+        const semanticEnabled = isSemanticToolEnabled(request.projectPath);
+        if (semanticEnabled) {
+            // Kick off embedding service in background (non-blocking)
+            // This ensures the semantic search index is warm by the time the agent needs it.
+            getEmbeddingService(request.projectPath).start().catch(err => {
+                logError(`[Agent] Embedding service startup failed for ${request.projectPath}: ${err?.message || err}`);
+            });
+        }
+
         // Load chat history (reads from JSONL)
         let chatHistory: ModelMessage[] = [];
         if (request.chatHistoryManager) {
@@ -443,7 +455,7 @@ export async function executeAgent(
 
         const runtimeVersion = await getRuntimeVersionFromPom(request.projectPath);
         logInfo(`[Agent] Runtime version detected: ${runtimeVersion ?? 'unknown'}`);
-        const systemPromptSelection = getSystemPrompt(runtimeVersion);
+        const systemPromptSelection = getSystemPrompt(runtimeVersion, semanticEnabled);
 
         // Resolve memory setting early — needed for both system prompt and tool registration.
         const memoryEnabled = request.memoryEnabled ?? ENABLE_MEMORY_TOOL;
@@ -1077,6 +1089,10 @@ export async function executeAgent(
                     } else if (DEEPWIKI_MCP_TOOL_NAMES.includes(part.toolName)) {
                         // DeepWiki MCP tools — pass through all input for display
                         displayInput = toolInput;
+                    } else if (part.toolName === SEMANTIC_SEARCH_TOOL_NAME) {
+                        displayInput = {
+                            query: toolInput?.query,
+                        };
                     }
 
                     // Skip tool call UI for todo_write (handled by inline todo list)
@@ -1086,6 +1102,7 @@ export async function executeAgent(
                             toolName: part.toolName,
                             toolInput: displayInput,
                             loadingAction,
+                            toolCallId: part.toolCallId,
                         });
                     }
                     break;
@@ -1123,6 +1140,7 @@ export async function executeAgent(
                             toolName: part.toolName,
                             toolOutput: { success: result.success },
                             completedAction: resultAction,
+                            toolCallId: part.toolCallId,
                         };
 
                         // Add shell output fields for shell tool
@@ -1133,6 +1151,11 @@ export async function executeAgent(
                             toolResultEvent.bashStderr = result.stderr;
                             toolResultEvent.bashExitCode = result.exitCode;
                             toolResultEvent.bashRunning = !!result.taskId;
+                        }
+
+                        // Add semantic search result data for semantic search tool
+                        if (part.toolName === SEMANTIC_SEARCH_TOOL_NAME && result?.semanticSearchData) {
+                            toolResultEvent.semanticSearchData = result.semanticSearchData;
                         }
 
                         // Send to visualizer with result action for display
