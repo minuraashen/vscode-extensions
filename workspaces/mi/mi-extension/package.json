@@ -185,7 +185,6 @@
           "description": "Enable semantic code search tool and embedding service for MI Copilot agent mode",
           "scope": "resource"
         },
-
         "MI.Scope": {
           "type": "string",
           "default": "",
