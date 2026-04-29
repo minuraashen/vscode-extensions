@@ -4166,9 +4166,6 @@ importers:
       axios:
         specifier: 1.15.0
         version: 1.15.0
-      canonicalize:
-        specifier: 2.1.0
-        version: 2.1.0
       copyfiles:
         specifier: 2.4.1
         version: 2.4.1
@@ -13532,10 +13529,6 @@ packages:
 
   caniuse-lite@1.0.30001777:
     resolution: {integrity: sha512-tmN+fJxroPndC74efCdp12j+0rk0RHwV5Jwa1zWaFVyw2ZxAuPeG8ZgWC3Wz7uSjT3qMRQ5XHZ4COgQmsCMJAQ==}
-
-  canonicalize@2.1.0:
-    resolution: {integrity: sha512-F705O3xrsUtgt98j7leetNhTWPe+5S72rlL5O4jA1pKqBVQ/dT1O1D6PFxmSXvc0SUOinWS57DKx0I3CHrXJHQ==}
-    hasBin: true
 
   canvas@3.2.1:
     resolution: {integrity: sha512-ej1sPFR5+0YWtaVp6S1N1FVz69TQCqmrkGeRvQxZeAB1nAIcjNTHVwrZtYtWFFBmQsF40/uDLehsW5KuYC99mg==}
@@ -29906,7 +29899,10 @@ snapshots:
       jest-runner: 25.5.4
       jest-runtime: 25.5.4
     transitivePeerDependencies:
+      - bufferutil
+      - canvas
       - supports-color
+      - utf-8-validate
 
   '@jest/test-sequencer@29.7.0':
     dependencies:
@@ -41939,8 +41935,6 @@ snapshots:
   caniuse-db@1.0.30001777: {}
 
   caniuse-lite@1.0.30001777: {}
-
-  canonicalize@2.1.0: {}
 
   canvas@3.2.1:
     dependencies:

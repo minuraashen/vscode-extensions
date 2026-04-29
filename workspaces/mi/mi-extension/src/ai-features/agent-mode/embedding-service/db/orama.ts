@@ -1,3 +1,21 @@
+/**
+ * Copyright (c) 2026, WSO2 LLC. (https://www.wso2.com/) All Rights Reserved.
+ *
+ * WSO2 LLC. licenses this file to you under the Apache License,
+ * Version 2.0 (the "License"); you may not use this file except
+ * in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied. See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+
 import { create, insert, update, remove, search, count, AnyOrama } from '@orama/orama';
 // @ts-ignore: TS module resolution doesn't pick up the exports map correctly here
 import { persistToFile, restoreFromFile } from '@orama/plugin-data-persistence/server';
@@ -20,17 +38,23 @@ export interface ChunkMetadata {
 }
 
 export interface ChunkRecord extends ChunkMetadata {
-  id: string; // Orama uses string IDs
-  embedding: Float32Array; // Stored natively as array of numbers in Orama, but returned as Float32Array locally for compat
+  id: string;
+  embedding: Float32Array;
 }
 
-// Bump this when the schema changes to force recreation of the persisted DB.
+/**
+ * Schema version for the persisted Orama database.
+ * 
+ * IMPORTANT: If you modify the `oramaSchema` below (add, remove, or rename fields), 
+ * you MUST increment this version string (e.g., '2' -> '3').
+ * 
+ * Why? This forces the extension to delete and recreate the local database 
+ * file (`embeddings.json`) on the user's disk. Without this, the extension 
+ * might crash trying to load stale data that doesn't match the new code structure.
+ */
 const DB_SCHEMA_VERSION = '2';
 
 const oramaSchema = {
-  // 'enum' → Flat tree → exact-match filter (where: { eq: ... }) works correctly.
-  // 'string' → Radix tree → only tokenized full-text search; { eq: ... } filter silently
-  // returns an empty set, so getChunksByFile / getSequenceDefinition would always return [].
   filePath: 'enum',
   fileHash: 'string',
   chunkType: 'string',
@@ -44,8 +68,7 @@ const oramaSchema = {
   isSequenceDefinition: 'boolean',
   referencedSequencesJson: 'string',
   embeddingText: 'string',
-  // all-MiniLM-L6-v2 models output 384-dimensional vectors
-  embedding: 'vector[384]',
+  embedding: 'vector[384]',   // all-MiniLM-L6-v2 models output 384-dimensional vectors
 } as const;
 
 export class OramaDB {
@@ -215,19 +238,21 @@ export class OramaDB {
     return await count(this.db);
   }
 
-  async semanticSearch(query: string, topK: number = 5, scoreThreshold: number = 0.5, queryVector: number[]) {
+  async semanticSearch(queryVector: number[], topK: number = 5, scoreThreshold: number = 0.5) {
     const results = await search(this.db, {
-      term: query,
-      mode: 'hybrid',
+      mode: 'vector',
       vector: {
         value: queryVector,
         property: 'embedding',
       },
+      // Without `similarity`, Orama defaults to DEFAULT_SIMILARITY=0.8 and silently discards
+      // any hit below that threshold before returning results. Pass our own threshold so the
+      // caller's scoreThreshold controls what gets through, not Orama's hard default.
+      similarity: scoreThreshold,
       limit: topK,
     });
-    
-    // Filter by threshold if needed (Orama vector similarity returns scores)
-    return results.hits.filter(hit => (hit.score ?? 0) >= scoreThreshold).map(hit => ({
+
+    return results.hits.map(hit => ({
       id: hit.id,
       filePath: (hit.document as any).filePath,
       chunkType: (hit.document as any).chunkType,

@@ -88,7 +88,7 @@ import {
 
 // Import types from mi-core (shared with visualizer)
 import { AgentEvent, AgentEventType, FileObject, ImageObject, AgentMode, ModelSettings } from '@wso2/mi-core';
-import { getEmbeddingService } from '../../embedding-service/src/embedding-service/vscode-service';
+import { getEmbeddingService } from '../../embedding-service/service/vscode-service';
 import { isSemanticToolEnabled } from '../../settings';
 
 // Re-export types for other modules that import from agent.ts
@@ -437,10 +437,9 @@ export async function executeAgent(
     try {
         logInfo(`[Agent] Starting agent execution for project: ${request.projectPath}`);
 
-        const semanticEnabled = isSemanticToolEnabled(request.projectPath);
-        if (semanticEnabled) {
-            // Kick off embedding service in background (non-blocking)
-            // This ensures the semantic search index is warm by the time the agent needs it.
+        const semanticToolEnabled = isSemanticToolEnabled(request.projectPath);
+        if (semanticToolEnabled) {
+            // Warm the embedding service in background when semantic search is enabled.
             getEmbeddingService(request.projectPath).start().catch(err => {
                 logError(`[Agent] Embedding service startup failed for ${request.projectPath}: ${err?.message || err}`);
             });
@@ -455,7 +454,7 @@ export async function executeAgent(
 
         const runtimeVersion = await getRuntimeVersionFromPom(request.projectPath);
         logInfo(`[Agent] Runtime version detected: ${runtimeVersion ?? 'unknown'}`);
-        const systemPromptSelection = getSystemPrompt(runtimeVersion, semanticEnabled);
+        const systemPromptSelection = getSystemPrompt(runtimeVersion, semanticToolEnabled);
 
         // Resolve memory setting early — needed for both system prompt and tool registration.
         const memoryEnabled = request.memoryEnabled ?? ENABLE_MEMORY_TOOL;

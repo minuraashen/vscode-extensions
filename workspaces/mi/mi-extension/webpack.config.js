@@ -97,7 +97,7 @@ module.exports = {
 
   entry: {
     extension: './src/extension.ts',
-    'embedding-worker': './src/ai-features/agent-mode/embedding-service/src/embedding-service/embedding-worker.ts',
+    'embedding-worker': './src/ai-features/agent-mode/embedding-service/service/embedding-worker.ts',
   },
   output: {
     path: path.resolve(__dirname, 'dist'),

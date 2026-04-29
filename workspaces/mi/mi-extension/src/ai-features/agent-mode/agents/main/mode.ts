@@ -23,7 +23,6 @@ import {
     ENTER_PLAN_MODE_TOOL_NAME,
     ASK_USER_TOOL_NAME,
 } from '../../tools/types';
-import { isSemanticToolEnabled } from '../../settings';
 
 
 const ASK_MODE_POLICY = `
@@ -38,7 +37,6 @@ const EDIT_MODE_POLICY = `
 
 export interface ModeReminderParams {
     mode?: AgentMode;
-    projectPath?: string;
 }
 
 export const PLAN_MODE_SHARED_GUIDELINES = `
@@ -76,7 +74,6 @@ Write/edit the plan file with these sections (adapt structure as needed):
  */
 export async function getModeReminder(params: ModeReminderParams): Promise<string> {
     const mode = params.mode || 'edit';
-    const semanticEnabled = params.projectPath ? isSemanticToolEnabled(params.projectPath) : true;
 
     if (mode === 'ask') {
         return ASK_MODE_POLICY;

@@ -27,7 +27,7 @@ import {
 	disposeEmbeddingService,
 	disposeAllEmbeddingServices,
 	getEmbeddingService,
-} from './ai-features/agent-mode/embedding-service/src/embedding-service/vscode-service';
+} from './ai-features/agent-mode/embedding-service/service/vscode-service';
 import { isSemanticToolEnabledForUri } from './ai-features/agent-mode/settings';
 import { activateMigrationSupport } from './migration';
 import { activateRuntimeService } from './runtime-services-panel/activate';

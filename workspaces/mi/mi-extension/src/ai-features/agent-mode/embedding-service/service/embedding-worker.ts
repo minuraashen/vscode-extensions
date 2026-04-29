@@ -1,3 +1,21 @@
+/**
+ * Copyright (c) 2026, WSO2 LLC. (https://www.wso2.com/) All Rights Reserved.
+ *
+ * WSO2 LLC. licenses this file to you under the Apache License,
+ * Version 2.0 (the "License"); you may not use this file except
+ * in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied. See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+
 import * as fs from 'fs';
 import * as path from 'path';
 import {
@@ -84,24 +102,6 @@ function emitStatusChanged(): void {
         ts: now(),
         type: 'event',
         method: 'status.changed',
-        payload,
-    });
-}
-
-function emitNoopProgress(detail: string): void {
-    const payload: IndexProgressEventPayload = {
-        stage: 'complete',
-        detail,
-        fileIndex: 0,
-        totalFiles: 0,
-    };
-
-    sendMessage({
-        v: IPC_PROTOCOL_VERSION,
-        id: `evt-index-${now()}`,
-        ts: now(),
-        type: 'event',
-        method: 'index.progress',
         payload,
     });
 }
@@ -275,18 +275,16 @@ async function handleInit(req: IpcRequestMessage): Promise<IpcResponseMessage> {
             fs.mkdirSync(dbDirectory, { recursive: true });
         }
 
-        if (!isModelDownloaded()) {
+        if (!isModelDownloaded(modelRootPath)) {
             emitLog('info', '[Worker] Model not found; downloading before init');
-            await downloadModel();
+            await downloadModel(undefined, modelRootPath);
         }
 
         const nextDb = new OramaDB(dbPath);
         await nextDb.initialize();
         const nextEmbedder = new Embedder();
 
-        // Phase 1: Load the ONNX model — this is the slow part for large models
-        // (e.g. code-rank-onnx is 522 MB). We emit a status update so the host
-        // can show a meaningful status bar message while waiting.
+        // Phase 1: Load the ONNX model 
         emitLog('info', '[Worker] Loading ONNX model — this may take a moment for large models');
         await nextEmbedder.initialize(modelRootPath);
         emitLog('info', '[Worker] ONNX model loaded successfully');
@@ -311,17 +309,14 @@ async function handleInit(req: IpcRequestMessage): Promise<IpcResponseMessage> {
         pipeline = nextPipeline;
         artifactDirs = resolveArtifactDirs(projectPath, artifactsSubPath);
 
-        // Phase 2: Mark worker as available immediately — the host can now query
-        // and search while indexing runs in the background asynchronously.
-        // This prevents the `init` IPC request from timing out on large projects.
+        // Phase 2: Mark worker as available immediately 
         state.chunkCount = await db.getChunkCount();
         state.initializing = false;
         state.available = true;
         state.reason = 'Worker ready';
         emitStatusChanged();
 
-        // Phase 3: Kick off initial indexing asynchronously — do NOT await it.
-        // Progress is reported via `index.progress` and `status.changed` events.
+        // Phase 3: Kick off initial indexing asynchronously
         setImmediate(() => {
             state.initializing = true;
             state.reason = 'Running initial indexing';
@@ -334,8 +329,7 @@ async function handleInit(req: IpcRequestMessage): Promise<IpcResponseMessage> {
                     state.reason = 'Worker ready';
                     emitStatusChanged();
 
-                    // Start polling for incremental updates now that initial
-                    // indexing is complete.
+                    // Start polling for incremental updates now that initial indexing is complete.
                     clearPolling();
                     pollTimer = setInterval(async () => {
                         try {
@@ -495,10 +489,9 @@ async function handleSearchSemantic(req: IpcRequestMessage): Promise<IpcResponse
     
     // Orama semantic search directly
     const rawHits = await db.semanticSearch(
-        req.payload.query,
+        Array.from(queryEmbedding),
         topK,
-        scoreThreshold,
-        Array.from(queryEmbedding)
+        scoreThreshold
     );
 
     const hits: SemanticSearchHit[] = rawHits.map(hit => ({

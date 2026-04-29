@@ -29,7 +29,7 @@ import { AgentMode } from '@wso2/mi-core';
 import { getModeReminder } from './mode';
 import { logDebug } from '../../../copilot/logger';
 import { getStateMachine } from '../../../../stateMachine';
-import { getEmbeddingService } from '../../embedding-service/src/embedding-service/vscode-service';
+import { getEmbeddingService } from '../../embedding-service/service/vscode-service';
 import { isSemanticToolEnabled } from '../../settings';
 
 const MAX_PROJECT_STRUCTURE_FILES = 50;
@@ -398,7 +398,6 @@ export async function getUserPrompt(params: UserPromptParams): Promise<UserPromp
     const mode = params.mode || 'edit';
     const modePolicyReminder = await getModeReminder({
         mode,
-        projectPath: params.projectPath,
     });
     const planFileReminder = mode === 'plan'
         ? await getPlanModeSessionReminder(params.projectPath, params.sessionId || 'default')

@@ -16,18 +16,6 @@
  * under the License.
  */
 
-/**
- * Unified file-change detection module.
- *
- * Combines two complementary strategies:
- *   1. **Watcher (hash-based polling)** — Used by {@link Pipeline} inside the
- *      forked worker process to detect changed/new/deleted XML files by
- *      comparing SHA-256 content hashes across polling intervals.
- *   2. **createEmbeddingFileWatcher (VS Code FS events)** — Used by
- *      {@link VSCodeEmbeddingService} in the extension host process to react
- *      to real-time file save/create/delete events via the VS Code API.
- */
-
 import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';

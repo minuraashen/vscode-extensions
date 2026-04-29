@@ -2,7 +2,7 @@ import * as assert from 'assert';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { XMLChunker, XMLChunk } from '../embedding-service/chunker';
+import { XMLChunker, XMLChunk } from '../service/chunker';
 
 // Run without an embedder — uses char-based token fallback (~4 chars/token),
 // so maxTokens=256 ≈ 1024 chars of embeddingText before a subtree is split.

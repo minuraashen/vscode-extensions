@@ -27,17 +27,7 @@ const MODEL_ORG = 'isuruwijesiri';
 const MODEL_NAME = 'all-MiniLM-L6-v2-code-search-512';
 const MODEL_ID = `${MODEL_ORG}/${MODEL_NAME}`;
 
-/**
- * Files that must be present for the model to be considered fully downloaded.
- * Paths are relative to the model root directory.
- *
- * @xenova/transformers resolves these relative to localModelPath/<org>/<model>/:
- *   - config.json, tokenizer_config.json, tokenizer.json, vocab.txt  (root)
- *   - onnx/model_quantized.onnx                                       (quantized ONNX)
- *
- * All of these exist in the HuggingFace repo under both the root and onnx/ folder.
- * We download the root-level copies that @xenova/transformers looks for by default.
- */
+// Required files for a complete model download (paths relative to model root).
 const REQUIRED_MODEL_FILES = [
     'config.json',
     'tokenizer_config.json',
@@ -52,10 +42,7 @@ const HF_BASE_URL = `https://huggingface.co/${MODEL_ID}/resolve/main`;
 
 /**
  * Returns the root directory for all WSO2 MI models.
- *
- * Uses MI_COPILOT_MODELS_DIR env var when set (override for testing/CI),
- * otherwise defaults to ~/.wso2-mi/copilot/models — consistent with all
- * other copilot storage paths and survives extension reinstalls.
+ * Uses MI_COPILOT_MODELS_DIR env var when set (override for testing/CI).
  */
 export function getWso2MiModelsDir(): string {
     const override = process.env.MI_COPILOT_MODELS_DIR?.trim();
@@ -66,14 +53,11 @@ export function getWso2MiModelsDir(): string {
 }
 
 /**
- * Returns the directory where the embedding model is stored.
- * ~/.wso2-mi/copilot/models/isuruwijesiri/all-MiniLM-L6-v2-code-search-512
- *
- * This is used as env.localModelPath by @xenova/transformers so it can
- * resolve model files by their relative paths (e.g. onnx/model_quantized.onnx).
+ * Returns the directory where the embedding model is stored on disk.
  */
-export function getLocalModelDir(): string {
-    return path.join(getWso2MiModelsDir(), MODEL_ORG, MODEL_NAME);
+export function getLocalModelDir(modelRootPath?: string): string {
+    const root = modelRootPath || getWso2MiModelsDir();
+    return path.join(root, MODEL_ORG, MODEL_NAME);
 }
 
 // ─── State Check ──────────────────────────────────────────────────────────────
@@ -81,8 +65,8 @@ export function getLocalModelDir(): string {
 /**
  * Returns true if all required model files are present on disk.
  */
-export function isModelDownloaded(): boolean {
-    const modelDir = getLocalModelDir();
+export function isModelDownloaded(modelRootPath?: string): boolean {
+    const modelDir = getLocalModelDir(modelRootPath);
     return REQUIRED_MODEL_FILES.every(f => fs.existsSync(path.join(modelDir, f)));
 }
 
@@ -91,17 +75,14 @@ export function isModelDownloaded(): boolean {
 export type ModelDownloadProgressCallback = (fileName: string, percent: number) => void;
 
 /**
- * Downloads the embedding model files from HuggingFace into ~/.wso2-mi/models/.
+ * Downloads the embedding model files from HuggingFace into the local model directory.
+ * Files are written to .part temporaries and renamed on success — no corrupt partials on failure.
  *
- * Uses only Node.js built-ins (https, fs) — no extra npm dependencies.
- * Each file is written to a temporary .part file first, then renamed on
- * success, so a failed download never leaves a corrupt partial file behind.
- *
- * @param onProgress - Optional callback called periodically with (fileName, percent 0-100)
- * @throws If any file download fails (partial .part file is cleaned up before throwing)
+ * @param onProgress - Optional callback called with (fileName, percent 0-100)
+ * @param modelRootPath - Optional override for the model root directory
  */
-export async function downloadModel(onProgress?: ModelDownloadProgressCallback): Promise<void> {
-    const modelDir = getLocalModelDir();
+export async function downloadModel(onProgress?: ModelDownloadProgressCallback, modelRootPath?: string): Promise<void> {
+    const modelDir = getLocalModelDir(modelRootPath);
 
     // Ensure all required directories exist
     fs.mkdirSync(path.join(modelDir, 'onnx'), { recursive: true });
@@ -126,10 +107,6 @@ export async function downloadModel(onProgress?: ModelDownloadProgressCallback):
     }
 }
 
-/**
- * Download a single file via HTTPS with progress reporting.
- * Writes to a .part temp file, renames to final path on completion.
- */
 function downloadFile(
     url: string,
     destPath: string,

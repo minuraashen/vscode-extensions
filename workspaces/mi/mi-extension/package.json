@@ -1054,8 +1054,8 @@
   },
   "scripts": {
     "clean": "rimraf ./dist",
-    "compile": "tsc -p . && webpack --mode development",
-    "watch": "webpack --mode development --watch",
+    "compile": "tsc -p .",
+    "watch": "tsc -p . -w",
     "package": "node ../../common-libs/scripts/package-vsix.js",
     "download-ls": "node ./scripts/download-ls.js",
     "build": "pnpm clean && pnpm run download-ls && pnpm run copyJSLibs && pnpm run copyLSLibs && pnpm run copyFonts && pnpm run copyDMUtils && pnpm run renameDMUtils && webpack --mode production --devtool hidden-source-map && pnpm run package && pnpm run postbuild",

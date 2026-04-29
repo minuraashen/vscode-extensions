@@ -1,15 +1,31 @@
+/**
+ * Copyright (c) 2026, WSO2 LLC. (https://www.wso2.com/) All Rights Reserved.
+ *
+ * WSO2 LLC. licenses this file to you under the Apache License,
+ * Version 2.0 (the "License"); you may not use this file except
+ * in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied. See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+
 import * as fs from 'fs';
 import { XMLParser } from 'fast-xml-parser';
 import { createHash } from 'crypto';
 
-/**
- * Semantic, Hierarchical, Structure-Aware XML Chunker for WSO2 MI artifacts
- *
- * Pure parsed-tree traversal — no external registry or heuristic rules.
- * Token count alone drives chunk boundaries; artifact metadata is read
- * directly from the XML root element's attributes.
- */
+interface LineRange {
+  start: number;
+  end: number;
+}
 
+// Processed XML chunk with metadata/context
 export interface XMLChunk {
   filePath: string;
   chunkType: string;
@@ -25,34 +41,18 @@ export interface XMLChunk {
   referencedSequences?: string[];
 }
 
-/**
- * Semantic context — fully generic, schema-agnostic.
- *
- * DESIGN: Only two explicit fields exist:
- *   - `artifact`: Root-level artifact metadata (read from the XML root element)
- *   - `references`: Cross-artifact references extracted from content
- *
- * All other context is stored dynamically via the `[key: string]: any` index
- * signature — making the chunker work identically for any XML schema.
- */
+// Semantic context for a chunk
 export interface SemanticContext {
-  // Root-level artifact metadata (always present)
+  /** Root-level artifact metadata (e.g., proxy name, api context) */
   artifact?: {
     type: string;
     name: string;
     xmlns?: string;
     [key: string]: any;
   };
-  // Cross-artifact references extracted from chunk content
+  /** Cross-artifact references extracted from the chunk content */
   references?: string[];
-  // DYNAMIC: All element-level contexts are stored here automatically
-  // Examples: { resource: { method: 'GET', uriTemplate: '/' }, filter: { source: '...' } }
   [key: string]: any;
-}
-
-interface LineRange {
-  start: number;
-  end: number;
 }
 
 export class XMLChunker {
@@ -75,7 +75,7 @@ export class XMLChunker {
     const parser = new XMLParser({
       ignoreAttributes: false,
       attributeNamePrefix: '',
-      removeNSPrefix: false, // Must preserve namespace for accurate context (e.g., wsp:Policy)
+      removeNSPrefix: false,
       preserveOrder: true,
       alwaysCreateTextNode: false,
     });
@@ -91,11 +91,6 @@ export class XMLChunker {
     return chunks;
   }
 
-  /**
-   * Build root context directly from the parsed XML tree.
-   * Reads the first real root element and captures its tag name + all attributes.
-   * No registry — the tree already has everything we need.
-   */
   private buildRootContext(parsed: any): SemanticContext {
     const context: SemanticContext = {};
 
@@ -104,7 +99,7 @@ export class XMLChunker {
       return context;
     }
 
-    // Find the first real element (skip ?xml processing instructions)
+    // Find first real element (skip ?xml)
     const rootItem = parsed.find(item => {
       const key = Object.keys(item).find(k => k !== ':@');
       return key && !key.startsWith('?');
@@ -122,11 +117,6 @@ export class XMLChunker {
     return context;
   }
 
-  /**
-   * Extract cross-artifact references from a chunk's XML content.
-   * Detects: sequence key, configKey (local entries), endpoint key,
-   *          call-template target, useConfig (data service), call-query href.
-   */
   private extractReferencesFromContent(content: string): string[] {
     const refs = new Set<string>();
     let match;
@@ -170,12 +160,6 @@ export class XMLChunker {
     return Array.from(refs);
   }
 
-  /**
-   * PURE TREE TRAVERSAL with token gating
-   *
-   * Every XML tag is a potential chunk boundary — no heuristics, no registry rules.
-   * Token count alone decides: fits → chunk, too big → descend into children.
-   */
   private processNode(
     node: any,
     lines: string[],
@@ -189,8 +173,7 @@ export class XMLChunker {
       const tagName = Object.keys(item).find(key => key !== ':@') || '';
       if (!tagName) continue;
 
-      // Skip XML declaration, processing instructions, and #text pseudo-nodes
-      // (#text is created by fast-xml-parser for mixed content — not a real XML tag)
+      // Skip XML declaration, processing instructions, #text pseudo-nodes
       if (tagName.startsWith('?xml') || tagName === '#text') continue;
 
       const element = item[tagName];
@@ -199,52 +182,44 @@ export class XMLChunker {
       // Update context for this node — passed to children if we descend
       const updatedContext = this.updateContext(tagName, nodeAttrs, context);
 
-      // Token gate: measure the full subtree content as embeddingText
-      // Use parent context (not updatedContext) — the chunk's own tag is already in content
+      // Token gate: measure subtree content as embeddingText
       const range = this.findElementRange(tagName, lines);
       const content = this.extractContent(lines, range);
       const embeddingText = this.createEmbeddingText(content, context);
       const tokenCount = this.countTokens(embeddingText);
 
       if (tokenCount <= this.maxTokens) {
-        // Fits → emit this node as a chunk, stop descending
+        // Fits: emit as chunk, stop descending
         this.createChunk(tagName, nodeAttrs, content, range, filePath, chunks, context, embeddingText);
       } else if (Array.isArray(element)) {
-        // Too large → descend into children
+        // Too large: descend into children
         const childChunksBefore = chunks.length;
         this.processNode(element, lines, filePath, chunks, updatedContext);
 
-        // Oversized leaf fallback: if no children produced chunks, force-emit this node
+        // Oversized leaf fallback: if no children, force-emit
         if (chunks.length === childChunksBefore) {
           this.createChunk(tagName, nodeAttrs, content, range, filePath, chunks, context, embeddingText);
         }
       } else {
-        // Leaf node (no children) that exceeds token limit → force-emit
+        // Leaf node (no children) over token limit: force-emit
         this.createChunk(tagName, nodeAttrs, content, range, filePath, chunks, context, embeddingText);
       }
 
-      // Prevent subsequent sibling scans from accidentally matching child tags
-      // inside the current element's line range.
+      // Prevent sibling scans from matching child tags in current range
       this.lastSearchPosition = Math.max(this.lastSearchPosition, range.end - 1);
     }
   }
 
-  /**
-   * Update semantic context as we traverse the tree.
-   * FULLY GENERIC: reads directly from the parsed tree — no registry.
-   */
   private updateContext(tagName: string, attrs: Record<string, string>, parentContext: SemanticContext): SemanticContext {
     const newContext = { ...parentContext };
     const localName = tagName.split(':').pop() || tagName;
 
-    // Skip the root artifact tag — context.artifact was already set by buildRootContext.
-    // Re-adding it here would duplicate it as a dynamic context key.
+    // Skip root artifact tag (already set)
     if (tagName === parentContext.artifact?.type || localName === parentContext.artifact?.type) {
       return newContext;
     }
 
-    // Generic context: capture all attributes for any element encountered during traversal.
-    // Any attribute could be semantically important (e.g., methods, uri-template, xpath).
+    // Capture all attributes for any element
     const allAttrs = this.extractAllAttributes(attrs);
 
     if (Object.keys(allAttrs).length > 0) {
@@ -257,10 +232,6 @@ export class XMLChunker {
     return newContext;
   }
 
-  /**
-   * Extract ALL non-internal attributes from an element, cleaning prefixes.
-   * Used for artifact-level elements where every attribute is configuration-critical.
-   */
   private extractAllAttributes(attrs: Record<string, string>): Record<string, any> {
     const allAttrs: Record<string, any> = {};
     for (const [key, value] of Object.entries(attrs)) {
@@ -273,9 +244,6 @@ export class XMLChunker {
     return allAttrs;
   }
 
-  /**
-   * Create a chunk from the current node
-   */
   private createChunk(
     tagName: string,
     attrs: Record<string, string>,
@@ -290,17 +258,13 @@ export class XMLChunker {
 
     const embeddingText = precomputedEmbeddingText ?? this.createEmbeddingText(content, context);
 
-    // Simplified content hash — hash the raw XML content only.
-    // Used by Pipeline for incremental embedding reuse.
+    // Content hash (raw XML only)
     const contentHash = createHash('sha256').update(content).digest('hex');
 
-    // Extract references from this chunk's content.
-    // NOTE: We do NOT mutate the shared `context` object here — that would
-    // pollute the context passed to any sibling nodes processed afterwards.
+    // Extract references (do not mutate shared context)
     const chunkReferences = this.extractReferencesFromContent(content);
 
-    // A chunk is a standalone artifact definition when its tag IS the root artifact tag.
-    // This is true exactly when this chunk represents the top-level element of the file.
+    // Chunk is standalone artifact if tag is root artifact
     const isDefinition = tagName === context.artifact?.type;
     const sequenceKey = isDefinition
       ? (attrs.name || attrs['@_name'] || attrs.key || attrs['@_key'])
@@ -322,14 +286,6 @@ export class XMLChunker {
     });
   }
 
-  /**
-   * Count tokens using the model's tokenizer.
-   * Receives the already-built embeddingText so the gate operates on the
-   * exact same text that will be sent to the embedding model.
-   *
-   * Falls back to character approximation (~4 chars per token) when no
-   * embedder is available (e.g., in tests).
-   */
   private countTokens(text: string): number {
     if (this.embedder && this.embedder.countTokens) {
       return this.embedder.countTokens(text);
@@ -338,15 +294,10 @@ export class XMLChunker {
     return Math.ceil(text.length / 4);
   }
 
-  /**
-   * Format context metadata into text for token counting and embedding.
-   * FULLY GENERIC: Iterates all context keys uniformly.
-   * No hardcoded field-specific formatting.
-   */
   private formatMetadata(context: SemanticContext): string {
     const parts: string[] = [];
 
-    // 1. Artifact context (root-level metadata)
+    // Artifact context (root-level)
     if (context.artifact) {
       const { type, name, xmlns, ...rest } = context.artifact;
       parts.push(`${this.formatContextKey(type)}: ${name}`);
@@ -366,8 +317,7 @@ export class XMLChunker {
       if (extraPairs) parts.push(extraPairs);
     }
 
-    // 2. DYNAMIC CONTEXT: Format ALL other context fields uniformly
-    //    This handles resource, sequence, filter, query, operation, and ANY arbitrary element
+    // Dynamic context: format all other fields
     const skipKeys = new Set(['artifact', 'references']);
 
     for (const [key, value] of Object.entries(context)) {
@@ -390,7 +340,7 @@ export class XMLChunker {
       }
     }
 
-    // 3. References (if any)
+    // References (if any)
     if (context.references && context.references.length > 0) {
       parts.push(`Uses: ${context.references.join(', ')}`);
     }
@@ -398,22 +348,16 @@ export class XMLChunker {
     return parts.join(' ');
   }
 
-  /**
-   * Format context key for display (e.g., "filter" -> "Filter", "Policy" -> "Policy")
-   */
   private formatContextKey(key: string): string {
     return key.charAt(0).toUpperCase() + key.slice(1);
   }
 
-  /**
-   * Find the line range for an XML element.
-   */
   private findElementRange(tagName: string, lines: string[]): LineRange {
     let startLine = -1;
     let endLine = -1;
     let depth = 0;
 
-    // Escape regex metacharacters in tagName (e.g. '.' in 'http.post' must not match any char)
+    // Escape regex metacharacters in tagName
     const escapedTag = tagName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
     for (let i = this.lastSearchPosition; i < lines.length; i++) {
@@ -458,26 +402,16 @@ export class XMLChunker {
     return lines.slice(range.start - 1, range.end).join('\n');
   }
 
-  /**
-   * Create natural text representation for embedding.
-   * Format: [Formatted Context Metadata] + [Cleaned XML Content tokens]
-   *
-   * Example:
-   *   context → "Api: BankAPI context=/bankapi Resource: method=GET uriTemplate=/"
-   *   content → <payloadFactory><format>{"greeting":"Hello"}</format></payloadFactory>
-   *   → "Api: BankAPI context=/bankapi Resource: method=GET payloadFactory format greeting Hello"
-   */
   private createEmbeddingText(
     content: string,
     context: SemanticContext
   ): string {
 
-    // Start with formatted context metadata as text
+    // Start with formatted context metadata
     const contextStr = this.formatMetadata(context);
     const tokens: string[] = contextStr ? [contextStr] : [];
 
-    // JSON BLOCK PROTECTION: Preserve JSON inside format/args tags before cleaning
-    // This prevents breaking structured payloads in embedding text
+    // Preserve JSON inside format/args tags before cleaning
     const jsonBlocks: string[] = [];
     const jsonProtectedContent = content.replace(
       /<(format|args)[^>]*>([\s\S]*?)<\/\1>/g,
@@ -493,7 +427,7 @@ export class XMLChunker {
       }
     );
 
-    // Comprehensive XML preprocessing: Remove all angle brackets and create natural text
+    // XML preprocessing: remove angle brackets, create natural text
     const cleanedContent = jsonProtectedContent
       // Extract tag names and attributes from opening tags: <tag attr="val"> → tag attr="val"
       .replace(/<([^>\/\s]+)([^>]*)>/g, ' $1 $2 ')
@@ -512,7 +446,7 @@ export class XMLChunker {
       .replace(/\s+/g, ' ')
       .trim();
 
-    // Split into meaningful tokens
+    // Split into tokens
     const contentTokens = cleanedContent
       .split(/\s+/)
       .filter(t => (t.length > 1 || /^\d+$/.test(t)) && t.length < 100); // Preserve numeric values (e.g. 0, 1) and longer tokens

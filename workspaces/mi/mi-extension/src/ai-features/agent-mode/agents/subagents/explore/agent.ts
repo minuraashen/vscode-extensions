@@ -138,7 +138,7 @@ export async function executeExploreSubagent(
         // stopWhen: stepCountIs(30) allows up to 30 tool calling steps
         const result = await generateText({
             model: anthropicModel,
-            system: EXPLORE_SUBAGENT_SYSTEM,
+            system: EXPLORE_SUBAGENT_SYSTEM(semanticEnabled),
             messages,
             tools,
             stopWhen: stepCountIs(30), // Allow up to 30 tool calls for thorough exploration

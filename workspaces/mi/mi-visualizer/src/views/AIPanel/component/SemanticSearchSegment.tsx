@@ -36,26 +36,26 @@ type ConfidenceLevel = 'high' | 'medium' | 'low' | 'very-low';
 function getConfidenceColor(confidence: ConfidenceLevel): string {
     switch (confidence) {
         case 'high':
-            return 'var(--vscode-testing-iconPassed, #4caf50)';
+            return 'var(--vscode-testing-iconPassed)';
         case 'medium':
-            return 'var(--vscode-terminal-ansiYellow, #e5c07b)';
+            return 'var(--vscode-terminal-ansiYellow)';
         case 'low':
             return 'var(--vscode-descriptionForeground)';
         case 'very-low':
-            return 'var(--vscode-errorForeground, #f14c4c)';
+            return 'var(--vscode-errorForeground)';
     }
 }
 
 function getConfidenceBgColor(confidence: ConfidenceLevel): string {
     switch (confidence) {
         case 'high':
-            return 'rgba(76, 175, 80, 0.15)';
+            return 'color-mix(in srgb, var(--vscode-testing-iconPassed) 18%, transparent)';
         case 'medium':
-            return 'rgba(229, 192, 123, 0.15)';
+            return 'color-mix(in srgb, var(--vscode-terminal-ansiYellow) 18%, transparent)';
         case 'low':
-            return 'rgba(128, 128, 128, 0.15)';
+            return 'color-mix(in srgb, var(--vscode-descriptionForeground) 14%, transparent)';
         case 'very-low':
-            return 'rgba(241, 76, 76, 0.15)';
+            return 'color-mix(in srgb, var(--vscode-errorForeground) 18%, transparent)';
     }
 }
 
@@ -64,8 +64,8 @@ function getConfidenceBgColor(confidence: ConfidenceLevel): string {
 // ============================================================================
 
 const Container = styled.div`
-    background-color: rgba(128, 128, 128, 0.06);
-    border: 1px solid rgba(128, 128, 128, 0.15);
+    background-color: var(--vscode-editorWidget-background);
+    border: 1px solid var(--vscode-editorWidget-border);
     border-radius: 4px;
     margin: 8px 0;
     overflow: hidden;
@@ -77,14 +77,14 @@ const Header = styled.div`
     display: flex;
     align-items: center;
     padding: 6px 10px;
-    background-color: rgba(128, 128, 128, 0.05);
-    border-bottom: 1px solid rgba(128, 128, 128, 0.12);
+    background-color: color-mix(in srgb, var(--vscode-editorWidget-background) 92%, var(--vscode-foreground) 8%);
+    border-bottom: 1px solid var(--vscode-editorWidget-border);
     cursor: pointer;
     user-select: none;
     gap: 6px;
 
     &:hover {
-        background-color: rgba(128, 128, 128, 0.1);
+        background-color: var(--vscode-list-hoverBackground);
     }
 `;
 
@@ -150,7 +150,7 @@ const ChunkList = styled.div`
 `;
 
 const ChunkItem = styled.div`
-    border-bottom: 1px solid rgba(128, 128, 128, 0.08);
+    border-bottom: 1px solid var(--vscode-editorWidget-border);
 
     &:last-child {
         border-bottom: none;
@@ -166,7 +166,7 @@ const ChunkHeader = styled.div`
     user-select: none;
 
     &:hover {
-        background-color: rgba(128, 128, 128, 0.06);
+        background-color: var(--vscode-list-hoverBackground);
     }
 `;
 
@@ -177,16 +177,16 @@ const ScoreBadge = styled.span<{ score: number }>`
     border-radius: 2px;
     flex-shrink: 0;
     background-color: ${(props: { score: number }) => {
-        if (props.score > 0.50) return 'rgba(76, 175, 80, 0.12)';
-        if (props.score > 0.38) return 'rgba(229, 192, 123, 0.12)';
-        if (props.score >= 0.30) return 'rgba(128, 128, 128, 0.12)';
-        return 'rgba(241, 76, 76, 0.12)';
+        if (props.score > 0.50) return 'color-mix(in srgb, var(--vscode-testing-iconPassed) 16%, transparent)';
+        if (props.score > 0.38) return 'color-mix(in srgb, var(--vscode-terminal-ansiYellow) 16%, transparent)';
+        if (props.score >= 0.30) return 'color-mix(in srgb, var(--vscode-descriptionForeground) 14%, transparent)';
+        return 'color-mix(in srgb, var(--vscode-errorForeground) 16%, transparent)';
     }};
     color: ${(props: { score: number }) => {
-        if (props.score > 0.50) return 'var(--vscode-testing-iconPassed, #4caf50)';
-        if (props.score > 0.38) return 'var(--vscode-terminal-ansiYellow, #e5c07b)';
+        if (props.score > 0.50) return 'var(--vscode-testing-iconPassed)';
+        if (props.score > 0.38) return 'var(--vscode-terminal-ansiYellow)';
         if (props.score >= 0.30) return 'var(--vscode-descriptionForeground)';
-        return 'var(--vscode-errorForeground, #f14c4c)';
+        return 'var(--vscode-errorForeground)';
     }};
 `;
 
@@ -234,8 +234,8 @@ const ChunkContent = styled.div`
 const CodeBlock = styled.pre`
     margin: 0;
     padding: 8px 10px;
-    background-color: rgba(128, 128, 128, 0.06);
-    border: 1px solid rgba(128, 128, 128, 0.12);
+    background-color: var(--vscode-editor-background);
+    border: 1px solid var(--vscode-editorWidget-border);
     border-radius: 3px;
     overflow-x: auto;
     font-family: var(--vscode-editor-font-family);
@@ -252,7 +252,7 @@ const LineNumberGutter = styled.span`
     min-width: 28px;
     text-align: right;
     margin-right: 8px;
-    color: var(--vscode-editorLineNumber-foreground, rgba(128,128,128,0.5));
+    color: var(--vscode-editorLineNumber-foreground);
     user-select: none;
     font-size: 10px;
 `;

@@ -29,13 +29,6 @@ export type AgentMode = 'ask' | 'edit' | 'plan';
 
 export type SemanticSearchConfidence = 'high' | 'medium' | 'low' | 'very-low';
 
-export interface SemanticScoreDistribution {
-    min: number;
-    max: number;
-    mean: number;
-    top_score: number;
-}
-
 export interface SemanticSearchChunk {
     file_path: string;
     line_range: [number, number];
@@ -52,10 +45,6 @@ export interface SemanticSearchData {
     confidence: SemanticSearchConfidence;
     confidence_threshold: number;
     query_latency_ms: number;
-    /** Distribution statistics for result scores */
-    score_distribution?: SemanticScoreDistribution;
-    /** Fraction (0-1) of returned chunks shorter than 3 lines */
-    fragment_chunk_ratio?: number;
     /** Whether the agent is still searching (loading state) */
     loading?: boolean;
 }

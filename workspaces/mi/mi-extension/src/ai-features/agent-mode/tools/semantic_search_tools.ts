@@ -27,7 +27,7 @@ import type {
 import {
     SemanticSearchExecuteFn,
 } from './types';
-import { getEmbeddingService } from '../embedding-service/src/embedding-service/vscode-service';
+import { getEmbeddingService } from '../embedding-service/service/vscode-service';
 
 // ============================================================================
 // Constants
@@ -37,7 +37,7 @@ import { getEmbeddingService } from '../embedding-service/src/embedding-service/
 const DEFAULT_TOP_K = 8;
 
 /** Maximum results allowed per query */
-const MAX_TOP_K = 50;
+const MAX_TOP_K = 15;
 
 /** Default minimum similarity score threshold */
 const DEFAULT_SCORE_THRESHOLD = 0.20;
@@ -53,15 +53,18 @@ const LOW_CONFIDENCE_THRESHOLD = 0.25;
 
 // ============================================================================
 // Confidence directives (emitted in tool response — not in system prompt)
-// These are informational signals about result quality, with strict instructions
-// to prevent redundant tool calls and token waste.
+// Descriptive hints about result quality. The model decides whether the chunks
+// answer the user's question by inspecting the chunk content, not by treating
+// the label as a command. The label is only loosely correlated with whether
+// any given chunk is sufficient — high chunks may miss context, low chunks
+// may still contain the answer.
 // ============================================================================
 
 const CONFIDENCE_DIRECTIVES: Record<SemanticSearchConfidence, string> = {
-    'high':        'CONFIDENCE: HIGH — results are highly relevant. Answer directly from these chunks without running additional search or read tools.',
-    'medium':      'CONFIDENCE: MEDIUM — results are moderately relevant. Answer from these chunks if possible. Only call file_read if a chunk is explicitly truncated in a way that prevents answering.',
-    'low':         'CONFIDENCE: LOW — results provide partial context. You may need to use grep or file_read to find the exact answer.',
-    'very-low':    'CONFIDENCE: VERY LOW — no sufficiently relevant results found.',
+    'high':     'CONFIDENCE: HIGH — top chunks are strongly relevant candidates. Read all returned chunks before deciding — the answer may not be at rank 1. Verify the top chunk\'s operation type matches what the user asked before anchoring. If it matches unambiguously, answer from the chunks. If the match is approximate or the chunk\'s operation type does not match the query intent, read relevant sibling artifacts before concluding.',
+    'medium':   'CONFIDENCE: MEDIUM — chunks are candidate matches, likely relevant but may be partial or misdirected. Read all returned chunks before deciding — the answer may not be at rank 1. Verify the top chunk\'s operation type matches the query intent. If chunks clearly and unambiguously answer the question, respond. Otherwise corroborate with a single targeted file_read of the most likely sibling artifact.',
+    'low':      'CONFIDENCE: LOW — treat as candidate starting points. Inspect each chunk against the question; if one clearly answers it, use it. Otherwise fall back to a single targeted grep or file_read with concrete identifiers from the question — rewording the same query will return the same chunks.',
+    'very-low': 'CONFIDENCE: VERY LOW — no sufficiently relevant results found. Use grep or file_read with concrete identifiers from the question. Do NOT retry semantic_search with rewordings of the same intent.',
 };
 
 // ============================================================================
@@ -140,24 +143,6 @@ function buildXmlHierarchy(chunk: ChunkLike): string[] {
     return hierarchy;
 }
 
-/**
- * Adjust effective K based on query breadth.
- *
- * Short/specific queries need fewer candidates; broad queries benefit from more
- * to give MMR enough room for diversity selection.
- * The final output is always capped at effectiveK via the trailing slice.
- */
-function adaptiveTopK(query: string, requestedK: number): number {
-    const words = query.split(/\s+/).filter(Boolean);
-    if (words.length <= 2) {
-        return Math.min(requestedK, 8);      // targeted — fewer candidates needed
-    }
-    if (words.length <= 5) {
-        return requestedK;                   // moderate — use requested K as-is
-    }
-    return Math.min(requestedK + 5, MAX_TOP_K); // broad — give MMR more room
-}
-
 // ============================================================================
 // Execute Function
 // ============================================================================
@@ -196,10 +181,9 @@ export function createSemanticSearchExecute(projectPath: string): SemanticSearch
                 };
             }
 
-            const effectiveK  = adaptiveTopK(query, topK);
-            const threshold   = score_threshold ?? DEFAULT_SCORE_THRESHOLD;
+            const threshold = score_threshold ?? DEFAULT_SCORE_THRESHOLD;
 
-            const workerSearch = await service.semanticSearch(query, effectiveK, threshold);
+            const workerSearch = await service.semanticSearch(query, topK, threshold);
             if (!workerSearch) {
                 return {
                     success: false,
@@ -336,8 +320,9 @@ export function createSemanticSearchTool(execute: SemanticSearchExecuteFn) {
             'Tip: phrase as a question or intent for best results.'
         ),
         top_k: z.number().optional().describe(
-            'Maximum results to return (default: 8, max: 50). ' +
-            'Use 5 for targeted single-artifact lookup, 8 for general exploration, 15+ for broad architecture understanding.'
+            'Maximum results to return (default: 8, max: 15). ' +
+            'Use 5 for targeted single-artifact lookup, 8 for general exploration, 12-15 for broad queries. ' +
+            'Scan all returned chunks before answering — the most relevant chunk may not be ranked first.'
         ),
         score_threshold: z.number().optional().describe(
             'Minimum similarity score 0–1 (default: 0.20). ' +
@@ -348,10 +333,10 @@ export function createSemanticSearchTool(execute: SemanticSearchExecuteFn) {
     return (tool as any)({
         description:
             'Semantic search over the MI project codebase. ' +
-            'Returns relevant code chunks with file paths, line ranges, XML element hierarchy, and inline source content. ' +
-            'Use for conceptual, natural-language, or cross-cutting queries — retrieves only relevant chunks, ' +
-            'reducing token usage compared to reading whole files. ' +
-            'Also useful when you would otherwise need to grep + read multiple files to understand a topic. ' +
+            'Use for inward/content questions — "what does X do", "how is Y implemented", "find pattern Z". ' +
+            'Returns ranked candidate chunks with file paths, line ranges, XML element hierarchy, and inline source content. ' +
+            'NOT reliable for outward/reference questions — "who calls X", "what triggers Y", "where is artifact Z used" — ' +
+            'use grep with the exact artifact name or sequence key for those, as cross-references are string keys that will not match semantically. ' +
             'Results include a confidence label indicating result quality. ' +
             'Falls back gracefully when the semantic index is unavailable.',
         inputSchema,

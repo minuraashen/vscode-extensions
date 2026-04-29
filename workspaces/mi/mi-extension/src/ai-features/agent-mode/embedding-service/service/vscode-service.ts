@@ -21,7 +21,7 @@ import * as fs from 'fs';
 import * as vscode from 'vscode';
 import { ChildProcess, fork } from 'child_process';
 import { createEmbeddingFileWatcher } from './file-watcher';
-import { getCopilotProjectStorageDir } from '../../../storage-paths';
+import { getCopilotProjectStorageDir } from '../../storage-paths';
 import { getWso2MiModelsDir, isModelDownloaded, downloadModel } from './model-manager';
 import {
     IPC_PROTOCOL_VERSION,
@@ -47,10 +47,7 @@ interface PendingWorkerRequest {
 /** Re-export for local use — canonical definition lives in ipc-types.ts */
 type WorkerStatusSnapshot = WorkerStatusPayload;
 
-/**
- * Configuration for the VSCode-integrated embedding service.
- * Paths are resolved relative to the embedding-service package root.
- */
+/** Configuration for the VSCode-integrated embedding service. */
 export interface VSCodeEmbeddingServiceConfig {
     /** Absolute path to the MI project root */
     projectPath: string;
@@ -64,23 +61,14 @@ export interface VSCodeEmbeddingServiceConfig {
     modelPath: string;
 }
 
-/**
- * Resolves default configuration for the VSCode embedding service.
- * Uses the embedding-service package root as the base for model/data/plugins paths.
- */
+/** Returns default configuration for the VSCode embedding service. */
 export function resolveDefaultConfig(projectPath: string): VSCodeEmbeddingServiceConfig {
     return {
         projectPath,
         artifactsSubPath: 'src/main/wso2mi/artifacts',
         pollIntervalMs: 60_000,
-        // Store embeddings DB in the per-project copilot storage dir, co-located with
-        // the chat history. Never written into the user's project directory.
-        // ~/.wso2-mi/copilot/projects/<name-hash>/embeddings.json
+        // Never written into the user's project directory.
         dbPath: path.join(getCopilotProjectStorageDir(projectPath), 'embeddings.json'),
-        // Root directory for all WSO2 MI models (~/.wso2-mi/models).
-        // @xenova/transformers resolves model IDs relative to this path, so
-        // 'isuruwijesiri/all-MiniLM-L6-v2-code-search-512' resolves to
-        // ~/.wso2-mi/models/isuruwijesiri/all-MiniLM-L6-v2-code-search-512/.
         modelPath: getWso2MiModelsDir(),
     };
 }
@@ -127,23 +115,8 @@ export async function disposeAllEmbeddingServices(): Promise<void> {
 }
 
 /**
- * VSCode-Integrated Embedding Service
- *
- * Thin coordinator that manages a forked worker process which runs the full
- * indexing pipeline (chunker → embedder → OramaDB). All heavy computation
- * (ONNX model loading, embedding generation, DB writes, incremental indexing)
- * happens in the worker. This class handles:
- *   - Worker lifecycle (start, stop, restart with exponential backoff)
- *   - IPC communication (request/response + event handling)
- *   - VS Code UI integration (status bar, progress notifications)
- *   - Real-time file watching (VS Code FileSystemWatcher)
- *
- * Lifecycle:
- *   1. `start()` — downloads model (if needed, with UI progress), forks worker,
- *      sends `init` IPC, sets up file watcher.
- *   2. `semanticSearch(query, topK, threshold)` — sends search request to worker.
- *   3. `notifyFileChange(filePath)` — sends file change notification to worker.
- *   4. `stop()` — kills worker, disposes watchers and status bar.
+ * Manages a forked worker process running the indexing pipeline (chunker → embedder → OramaDB).
+ * Handles worker lifecycle, IPC, VS Code status bar, and file watching.
  */
 export class VSCodeEmbeddingService {
     private config: VSCodeEmbeddingServiceConfig;
@@ -160,7 +133,6 @@ export class VSCodeEmbeddingService {
     private workerRestartTimer: NodeJS.Timeout | null = null;
     private workerStopRequested = false;
     private workerStatusSnapshot: WorkerStatusSnapshot | null = null;
-    /** Event emitter for ready state changes */
     private _onReady = new vscode.EventEmitter<boolean>();
     /** Fires when the service finishes initialization (true = success, false = failed). */
     public readonly onReady = this._onReady.event;
@@ -301,7 +273,7 @@ export class VSCodeEmbeddingService {
             this._isAvailable = false;
             this._isInitializing = false;
             this.showStatusBar(
-                '$(error) MI: Worker Init Failed',
+                '$(error) MI: Embedding Worker Init Failed',
                 'Semantic worker failed to start.'
             );
             this._onReady.fire(false);
@@ -397,11 +369,7 @@ export class VSCodeEmbeddingService {
         }
     }
 
-    /**
-     * Notify the service that a specific file has changed.
-     * Triggers an immediate incremental re-index for that file's directory
-     * by forwarding the event to the worker process.
-     */
+    /** Notify the service that a specific file has changed for incremental re-indexing. */
     async notifyFileChange(filePath: string): Promise<void> {
         if (!this.workerReady) {
             return;
